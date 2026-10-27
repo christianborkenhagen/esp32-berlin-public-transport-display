@@ -1,0 +1,27 @@
+{
+  "build": {
+    "core": "esp32",
+    "f_flash": "80000000L",
+    "flash_mode": "qio",
+    "mcu": "esp32s3",
+    "psram_type": "opi",
+    "variant": "esp32s3"
+  },
+  "connectivity": [
+    "bluetooth",
+    "wifi"
+  ],
+  "frameworks": [
+    "espidf"
+  ],
+  "name": "Elecrow CrowPanel Advance 5.0 V1.1 (DIS02050A, N16R8)",
+  "upload": {
+    "flash_size": "16MB",
+    "maximum_ram_size": 327680,
+    "maximum_size": 16777216,
+    "require_upload_port": true,
+    "speed": 460800
+  },
+  "url": "https://www.elecrow.com/wiki/CrowPanel_Advance_5.0-HMI_ESP32_AI_Display.html",
+  "vendor": "Elecrow"
+}

@@ -1,0 +1,11 @@
+.pio/
+sdkconfig
+sdkconfig.old
+sdkconfig.crowpanel_advance_5_v1_1
+managed_components/
+build/
+*.bin
+*.elf
+*.map
+.vscode/c_cpp_properties.json
+.vscode/launch.json
