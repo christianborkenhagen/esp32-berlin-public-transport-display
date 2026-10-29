@@ -3,6 +3,7 @@ sdkconfig
 sdkconfig.old
 sdkconfig.crowpanel_advance_5_v1_1
 sdkconfig.crowpanel_advance_5_v1_1_o3
+sdkconfig.crowpanel_advance_5_v1_1_tick1000
 managed_components/
 build/
 *.bin

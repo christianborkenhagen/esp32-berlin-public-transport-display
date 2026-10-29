@@ -3,54 +3,95 @@
 PlatformIO / ESP-IDF project for the **Elecrow CrowPanel Advance 5.0 V1.1**
 (PCB SKU **DIS02050A**, ESP32-S3-WROOM-1-N16R8).
 
-## LVGL widgets demo
+## Animation benchmark
 
-The firmware configures the board for 16 MB QIO flash and octal PSRAM, uses the
-project partition table, turns on the V1.1 backlight controller, and initializes
-the 800×480 RGB panel. It then starts LVGL 9.4.0's widgets demo using two
-full-screen RGB565 framebuffers in PSRAM and the RGB driver's 20-line bounce
-buffers in internal RAM. LVGL renders into the inactive framebuffer in direct
-mode. After the last dirty area, a worker on the LCD interrupt core switches
-framebuffers and waits for the next bounce-frame completion before LVGL reuses
-the previous buffer. Sharing a core prevents a completion for the old frame
-from racing with the switch. When the GT911
-responds at I²C address `0x5D`, the firmware polls it for touch coordinates so
-the demo controls can be used. The LVGL worker runs on core 1; touch is polled at
-30 ms over 400 kHz I²C, with short transaction timeouts so a missing touch
-response cannot stall the UI for a long period.
+The firmware starts a continuously looping benchmark with eight 12-second scenes:
+a speedometer, moving blocks, animated arcs, translucent layers, and an
+automatically scrolling list, followed by three static comparison scenes. Each
+eight-scene cycle alternates the LVGL display
+refresh and animation timer periods between 33 ms and 25 ms; the active period
+is shown on screen and logged. Animation durations and the 30 ms touch polling
+configuration are unchanged. It does not start the widgets demo or transport
+prototype. Leave the screen untouched when comparing runs. Each scene and its
+one-second FPS/CPU samples are also reported on the serial console.
 
-The default build compiles the LVGL component with `-O2` and places LVGL's marked
-performance-sensitive functions in internal instruction RAM; the rest of the
-firmware keeps the configured ESP-IDF compiler optimization level. This uses
-internal RAM and may make LVGL code harder to step through in a debugger.
-LVGL uses two FreeRTOS software-rendering workers. On this ESP-IDF Xtensa
-port `StackType_t` is one byte, so the default configuration allocates
-32 KiB of stack per worker.
-An additional 48 KiB LVGL allocation pool in PSRAM supplements the 64 KiB
-internal pool for temporary rendering allocations. A startup message reports
-whether the extra pool was added successfully.
+To compare refresh periods with the same firmware, use the 1000 Hz build below
+and capture at least two full cycles (about three minutes and 15 seconds),
+preferably more.
+Compare the same scenes and discard samples near scene or period changes:
+their one-second measurement windows may include the previous scene or period.
+The 25 ms setting is a timer period, not a promise of 40 FPS; panel scanout
+and rendering remain independent limits. Confirm both modes are visually stable.
 
-The demo's Profile avatar is precomposited with LVGL onto its solid panel
-background as RGB565 in PSRAM, avoiding repeated alpha blending while scrolling.
-The original ARGB8888 image remains available; the firmware falls back to it
-for selected incompatible background, transform, geometry, opacity, or
-recolor changes. The RGB565 buffer costs about 48 KiB of PSRAM.
+The three static comparison scenes use the same basic layout:
 
-ESP-IDF Component Manager downloads LVGL from the manifest in
-`src/idf_component.yml` on the first build. The widget demo, its fonts, and
-LVGL's separate examples are enabled in `sdkconfig.defaults`. The firmware
-still starts the widgets demo; enabling the examples makes them available for
-use but does not run one automatically.
+- **Static idle:** no periodic changes or redraws after the initial scene draw.
+- **Static 1 pixel:** a 1×1 object changes color at the selected timer period.
+- **Static full redraw:** the entire screen is invalidated at the same timer
+  period, forcing a redraw of the static content without changing its appearance.
 
-## Transport-screen prototype
+These tests keep the on-screen metrics label fixed, so it does not add dirty
+regions. Live FPS and CPU estimates are available on the serial console. The
+five-second diagnostics report the average and largest LVGL redraw regions;
+use windows wholly within a scene to check that they are approximately 1 and
+384,000 pixels, respectively. Transition windows can include the previous scene.
+The redraw timer and display refresh timer are separate, so updates may be
+coalesced or delayed; the selected period is not a guaranteed FPS.
 
-Send `t` in the serial monitor to open a simple, scrollable departures screen.
-It uses **fictional, simulated data**, not a transport API: one displayed
-departure time changes every five seconds while the screen is active. The
-screen uses opaque backgrounds, simple shapes, and small individual label
-updates. Use its **Widgets** button or send `d` to return to the widgets demo.
-The prototype is released when leaving it; the existing panel and framebuffer
-synchronization are unchanged.
+After the idle transition, presented FPS should approach zero because nothing
+is being presented, even though the panel continues scanning at approximately
+39 Hz. This idle test does not measure maximum rendering throughput. All three
+tests still use the same two full-screen framebuffers and synchronized switching;
+the one-pixel test is a partial LVGL redraw, not a change to panel scanout.
+Avoid touching the screen during the test. Per-core idle-counter CPU estimates
+can be especially noisy if an idle task is not switched out during a sample.
+
+The display uses two full-screen RGB565 framebuffers in PSRAM and the RGB
+driver's 20-line internal-RAM bounce buffers. LVGL renders into the inactive
+framebuffer. After the last dirty area, a task on the LCD interrupt core switches
+framebuffers and waits for bounce-frame completion before LVGL reuses the old
+buffer. This synchronization is unchanged from the previous test firmware.
+
+The overlay reports:
+
+- **FPS:** completed framebuffer switches per second over the last actual
+  sampling interval, not the panel's scan rate. Updating the overlay itself
+  causes a small amount of drawing and can contribute to the count.
+- **CPU:** approximate average busy percentage across both cores, calculated
+  from the change in each FreeRTOS idle task's runtime. This is not the LVGL
+  task's CPU usage alone. Interrupt time can be attributed to the interrupted
+  task, and sampling and runtime-statistics overhead affect the estimate.
+
+The serial monitor additionally reports refresh timing, redraw area, scanout
+counters, and internal heap every five seconds. These measurements do not
+prove the display is flicker-free; check the physical screen too. Scene changes
+and the on-screen metrics update can be included in an adjacent sample.
+
+The per-scene serial samples include estimated busy percentages for each
+core as well as their average. The five-second diagnostics also report:
+
+- **Present interval:** time between completed framebuffer switches.
+- **Between presented refreshes:** time from the end of one LVGL refresh that
+  presented a frame to the start of the next such refresh. This includes task
+  delays, other LVGL work, diagnostics, and any refreshes without a presentation;
+  it is not exclusively scheduler time.
+- **LVGL task delay:** requested delay after conversion to FreeRTOS ticks, and
+  the actual elapsed time until the task resumes. Tick phase and other tasks can
+  affect the observed delay.
+
+These are wall-clock measurements, not CPU execution times. Interval and gap
+samples can cross reporting windows or scene boundaries. Idle-task counters are
+updated on context switches, so short per-core samples can be noisy; interrupt
+attribution also affects them.
+
+The default build compiles LVGL at `-O2`, uses two FreeRTOS drawing workers
+with 32 KiB stacks, and adds a 48 KiB PSRAM pool to LVGL's 64 KiB internal
+pool. LVGL examples are disabled in the defaults; the separate widgets demo
+build setting remains available, although the firmware does not start it.
+Touch is initialized and polled when the GT911 is available, but no
+touch is needed for the benchmark. The transport prototype and old scroll
+benchmark scripts remain in the repository as historical code; their serial
+commands do not run on this firmware.
 
 ## Build, upload, and monitor
 
@@ -58,75 +99,65 @@ From this directory:
 
 ```powershell
 pio run
-pio run -t upload
-pio device monitor
+pio run -t upload --upload-port COM6
+pio device monitor --port COM6
 ```
 
-If more than one serial device is present, select the board's port with
-`pio run -t upload --upload-port COMx` and
-`pio device monitor --port COMx`.
-
-Use the board's programming USB connection for upload. The display should show
-LVGL's Profile, Analytics, and Shop tabs. Touch the screen to explore the
-widgets. The serial monitor reports whether the touch controller and backlight
-controller responded over I²C.
-
-For a repeatable performance comparison, send `b` through the serial monitor
-and don't touch the display until the benchmark finishes. It selects Profile
-and performs 40 fixed scrolling steps down and back up, logging the scroll
-range, elapsed time, and average refresh timings. Compare runs with the same
-scroll range; this synthetic test complements rather than replaces a visual
-check for smoothness and flicker. Alternatively, with the monitor closed, run
-`python tools/run_scroll_benchmark.py COMx` using an environment that has
-`pyserial` installed (such as PlatformIO's Python environment).
-Optional `--tiles 2|4`, `--avatar normal|hidden`,
-`--avatar-format original|rgb565`, and
-`--effects normal|simple` arguments select A/B test settings before the run.
-Use `--screen transport` (or send `c` in the monitor) to run the same 40-step
-test on the prototype; its simulated updates pause during the test. Compare
-repeated runs of the *same* screen and scroll range: Profile and the prototype
-have different content, dimensions, and ranges, so their times are not a
-controlled widget-for-widget comparison.
-Hiding the Profile avatar preserves its layout; simple effects override
-main-part theme radius and shadow on Profile objects (local styles and other
-parts can still take precedence). These settings persist until changed or the
-board resets. Restore the normal appearance with `--avatar normal`,
-`--avatar-format rgb565`, and `--effects normal`. Always compare results with
-identical scroll ranges.
-
-For a touch-responsiveness experiment, send `i` for a 10 ms polling period or
-`j` to restore the 30 ms default. The script also accepts `--touch 10|30`.
-The diagnostics report observed intervals between reads; these include delays
-when the LVGL task is busy and are **not** input-to-photon latency. Compare
-manual touch behavior as well as the logs; faster polling does not guarantee
-faster rendering.
-
-The separate `crowpanel_advance_5_v1_1_o3` PlatformIO environment builds the
-LVGL component at `-O3` instead of `-O2`. For example:
+Replace `COM6` with the board's port if necessary. The benchmark starts
+automatically and cycles through its scenes indefinitely. Close the serial
+monitor before uploading. To test the metric calculations on a host with GCC:
 
 ```powershell
-pio run -e crowpanel_advance_5_v1_1_o3
-pio run -e crowpanel_advance_5_v1_1_o3 -t upload --upload-port COM6
+gcc -std=c11 -Wall -Wextra -Werror -Isrc tests/test_benchmark_metrics.c src/benchmark_metrics.c -o .pio/benchmark_metrics_test.exe
+.\.pio\benchmark_metrics_test.exe
 ```
 
-The regular environment remains `-O2`; the startup log identifies the chosen
-level. The `-O3` environment uses `sdkconfig.o3.defaults` to set each worker
-stack to 16 KiB on a fresh configuration. The larger `-O3` instruction-RAM
-image leaves insufficient internal memory for both 32 KiB worker stacks on
-this board; a missing worker can make the first screen hang.
+A fresh ESP-IDF configuration enables FreeRTOS runtime statistics using the
+ESP timer in `sdkconfig.defaults`. Existing generated `sdkconfig` files take
+precedence over defaults. If upgrading an existing checkout, use
+`pio run -t menuconfig` to enable `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS`,
+select the ESP timer as the runtime statistics clock, and use the 32-bit
+counter type. Repeat for the `-O3` environment if using it. The build fails
+explicitly if the required statistics are disabled.
+Existing configurations may also retain `CONFIG_LV_BUILD_EXAMPLES=y`; disable
+it in each environment's menuconfig to stop building the examples.
 
-Generated `sdkconfig` files take precedence over defaults. If an existing
-`-O3` configuration has the old 32 KiB setting, set
-`CONFIG_LV_DRAW_THREAD_STACK_SIZE=16384` using
-`pio run -e crowpanel_advance_5_v1_1_o3 -t menuconfig`. The build rejects the
-known-problematic 32 KiB-or-larger setting in this environment.
+### Scheduler tick A/B test
 
-For a comparison, keep the other settings equivalent, run the same benchmark
-several times, and check memory use, touch behavior, tab switching, and flicker.
-The stack sizes differ, so this is not a pure compiler-flag comparison.
-On the transport scroll benchmark, the tested `-O3` build was not
-meaningfully faster than `-O2`; `-O3` remains experimental.
+The default `crowpanel_advance_5_v1_1` environment uses a 100 Hz FreeRTOS
+tick; `crowpanel_advance_5_v1_1_tick1000` uses 1000 Hz. Both use the same
+alternating LVGL timer periods and synchronized framebuffer-switching code. A higher tick
+rate can add overhead; it is not assumed to improve performance or visual
+stability.
 
+Flash each build in turn, closing the monitor before each upload:
+
+```powershell
+pio run -e crowpanel_advance_5_v1_1 -t upload --upload-port COM6
+pio device monitor --port COM6
+# Close the monitor, then:
+pio run -e crowpanel_advance_5_v1_1_tick1000 -t upload --upload-port COM6
+pio device monitor --port COM6
+```
+
+For each run, leave the display untouched and capture at least two complete
+eight-scene cycles (about three minutes and 15 seconds). Confirm the startup `Timing` line reports
+the intended tick rate and note any flickering or instability. Compare the
+same scene and period's FPS, per-core CPU, refresh timings and cadence, preferably
+over multiple cycles rather than at scene transitions. Replace `COM6` if needed.
+To restore the baseline, flash the first environment again.
+
+Each environment has its own generated `sdkconfig`; existing files take
+precedence over defaults. The 1000 Hz build fails if its generated config does
+not actually specify 1000 Hz. For a controlled comparison, keep other settings
+the same between the two configs.
+
+The optional `crowpanel_advance_5_v1_1_o3` environment builds LVGL at `-O3`
+with 16 KiB worker stacks for a fresh configuration. Existing `-O3`
+configurations using 32 KiB stacks must be changed to 16 KiB in menuconfig;
+the larger `-O3` IRAM image can otherwise prevent a worker from starting.
+This build remains experimental; earlier transport-screen tests found no
+meaningful improvement over `-O2`.
 ## VS Code note
 
 PlatformIO builds this ESP-IDF project using CMake internally. The root

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c" "transport_screen.c"
+    SRCS "main.c" "benchmark_screen.c" "benchmark_metrics.c"
     INCLUDE_DIRS "."
     REQUIRES esp_lcd esp_driver_i2c lvgl
 )

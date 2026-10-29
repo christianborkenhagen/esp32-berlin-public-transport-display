@@ -1,8 +1,6 @@
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -18,8 +16,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "lvgl.h"
-#include "lv_demos.h"
-#include "transport_screen.h"
+#include "benchmark_screen.h"
 
 #if !CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0 && !CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1
 #error "The main task must be pinned so the LCD interrupts and switch task share a core"
@@ -36,8 +33,6 @@
 #define LCD_BOUNCE_BUFFER_LINES  20
 #define LCD_FRAME_SYNC_TIMEOUT_MS 1000
 #define LCD_DIAGNOSTICS_PERIOD_MS 5000
-#define BENCHMARK_STEPS          40
-#define BENCHMARK_TIMEOUT_US     (5 * 1000 * 1000)
 
 /* Elecrow's V1.1 RGB pin map from its board example. */
 #define LCD_PCLK_GPIO           39
@@ -84,6 +79,16 @@ static uint64_t s_lvgl_drawn_pixels;
 static uint64_t s_lvgl_drawn_regions;
 static uint32_t s_lvgl_largest_region_pixels;
 static lv_area_t s_lvgl_largest_region;
+/* All cadence counters below are accessed only by the LVGL task. */
+static uint64_t s_last_present_us;
+static uint64_t s_present_interval_sum_us;
+static uint32_t s_present_interval_count;
+static uint32_t s_present_interval_min_us;
+static uint32_t s_present_interval_max_us;
+static uint64_t s_last_present_refresh_end_us;
+static uint64_t s_refresh_gap_sum_us;
+static uint32_t s_refresh_gap_count;
+static uint32_t s_refresh_gap_max_us;
 static lv_timer_t *s_touch_timer;
 static uint32_t s_touch_period_ms = LVGL_TOUCH_READ_PERIOD_MS;
 static int64_t s_touch_last_read_us;
@@ -92,36 +97,6 @@ static uint32_t s_touch_interval_count;
 static uint32_t s_touch_interval_max_us;
 static bool s_touch_pressed;
 static lv_point_t s_last_touch;
-static bool s_benchmark_active;
-static bool s_benchmark_setup;
-static lv_obj_t *s_benchmark_profile;
-static lv_obj_t *s_benchmark_target;
-static lv_obj_t *s_demo_screen;
-static bool s_benchmark_transport;
-static int32_t s_benchmark_scroll_max;
-static uint32_t s_benchmark_step;
-static uint32_t s_benchmark_last_frame;
-static uint32_t s_benchmark_first_frame;
-static int64_t s_benchmark_last_progress_us;
-static int64_t s_benchmark_start_us;
-static uint64_t s_benchmark_prepare_start_us;
-static uint64_t s_benchmark_render_start_us;
-static uint64_t s_benchmark_sync_start_us;
-static uint64_t s_benchmark_refresh_start_us;
-static uint64_t s_benchmark_pixels_start;
-static uint64_t s_benchmark_regions_start;
-static lv_obj_t *s_benchmark_avatar;
-static lv_style_t s_benchmark_hide_avatar_style;
-static lv_style_t s_benchmark_simple_effects_style;
-static bool s_benchmark_avatar_hidden;
-static bool s_benchmark_effects_simple;
-static lv_obj_t *s_avatar_canvas;
-static const lv_image_dsc_t *s_avatar_rgb565;
-static lv_color_t s_avatar_background;
-static bool s_avatar_rgb565_requested;
-
-LV_IMAGE_DECLARE(img_demo_widgets_avatar);
-
 static void init_i2c_and_backlight(void)
 {
     const i2c_master_bus_config_t bus_config = {
@@ -227,14 +202,6 @@ static void gt911_clear_status(void)
 static void lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
-
-    if (s_benchmark_active) {
-        s_touch_last_read_us = 0;
-        s_touch_pressed = false;
-        data->state = LV_INDEV_STATE_RELEASED;
-        data->point = s_last_touch;
-        return;
-    }
 
     int64_t now_us = esp_timer_get_time();
     if (s_touch_last_read_us != 0) {
@@ -423,7 +390,20 @@ static void lvgl_flush_cb(lv_display_t *display, const lv_area_t *area,
                                       pdMS_TO_TICKS(2 * LCD_FRAME_SYNC_TIMEOUT_MS)) == pdTRUE
                             ? ESP_OK
                             : ESP_ERR_TIMEOUT);
-        s_lvgl_sync_wait_us += (uint64_t)(esp_timer_get_time() - wait_start_us);
+        uint64_t present_us = (uint64_t)esp_timer_get_time();
+        s_lvgl_sync_wait_us += present_us - (uint64_t)wait_start_us;
+        if (s_last_present_us != 0) {
+            uint32_t interval_us = (uint32_t)(present_us - s_last_present_us);
+            s_present_interval_sum_us += interval_us;
+            s_present_interval_count++;
+            if (s_present_interval_min_us == 0 || interval_us < s_present_interval_min_us) {
+                s_present_interval_min_us = interval_us;
+            }
+            if (interval_us > s_present_interval_max_us) {
+                s_present_interval_max_us = interval_us;
+            }
+        }
+        s_last_present_us = present_us;
         s_lvgl_frame_count++;
         static bool first_frame_logged;
         if (!first_frame_logged) {
@@ -457,6 +437,15 @@ static void lvgl_display_event_cb(lv_event_t *event)
             uint64_t refresh_us = now_us - refresh_start_us;
             uint64_t prepare_us = render_start_us - refresh_start_us;
             uint64_t sync_wait_us = s_lvgl_sync_wait_us - sync_wait_start_us;
+            if (s_last_present_refresh_end_us != 0) {
+                uint32_t gap_us = (uint32_t)(refresh_start_us - s_last_present_refresh_end_us);
+                s_refresh_gap_sum_us += gap_us;
+                s_refresh_gap_count++;
+                if (gap_us > s_refresh_gap_max_us) {
+                    s_refresh_gap_max_us = gap_us;
+                }
+            }
+            s_last_present_refresh_end_us = now_us;
             s_lvgl_prepare_us += prepare_us;
             /* Render phase includes the synchronous flush; report it separately. */
             s_lvgl_render_us += refresh_us - prepare_us - sync_wait_us;
@@ -471,326 +460,10 @@ static void lvgl_display_event_cb(lv_event_t *event)
     }
 }
 
-/*
- * The precomposited image is valid only over the same solid panel background
- * and away from its rounded border. Fall back if the demo's style changes.
- */
-static bool avatar_rgb565_compatible(void)
+static uint32_t benchmark_present_count(void)
 {
-    if (s_benchmark_avatar == NULL || s_avatar_rgb565 == NULL) {
-        return false;
-    }
-    lv_obj_t *panel = lv_obj_get_parent(s_benchmark_avatar);
-    if (panel == NULL ||
-        lv_obj_get_style_bg_opa(panel, LV_PART_MAIN) != LV_OPA_COVER ||
-        lv_obj_get_style_bg_grad_dir(panel, LV_PART_MAIN) != LV_GRAD_DIR_NONE ||
-        lv_obj_get_style_bg_image_src(panel, LV_PART_MAIN) != NULL ||
-        !lv_color_eq(lv_obj_get_style_bg_color(panel, LV_PART_MAIN), s_avatar_background) ||
-        lv_image_get_rotation(s_benchmark_avatar) != 0 ||
-        lv_image_get_scale_x(s_benchmark_avatar) != LV_SCALE_NONE ||
-        lv_image_get_scale_y(s_benchmark_avatar) != LV_SCALE_NONE ||
-        lv_obj_get_style_image_recolor_opa(s_benchmark_avatar, LV_PART_MAIN) != LV_OPA_TRANSP) {
-        return false;
-    }
-    lv_opa_t image_opa = lv_obj_get_style_image_opa(s_benchmark_avatar, LV_PART_MAIN);
-    if (image_opa != LV_OPA_COVER && image_opa != LV_OPA_TRANSP) {
-        return false;
-    }
-
-    lv_area_t panel_area;
-    lv_area_t avatar_area;
-    lv_obj_get_coords(panel, &panel_area);
-    lv_obj_get_coords(s_benchmark_avatar, &avatar_area);
-    int32_t inset = lv_obj_get_style_radius(panel, LV_PART_MAIN);
-    int32_t border = lv_obj_get_style_border_width(panel, LV_PART_MAIN);
-    if (border > inset) {
-        inset = border;
-    }
-    if (inset < 0) {
-        return false;
-    }
-    return avatar_area.x1 >= panel_area.x1 + inset &&
-           avatar_area.y1 >= panel_area.y1 + inset &&
-           avatar_area.x2 <= panel_area.x2 - inset &&
-           avatar_area.y2 <= panel_area.y2 - inset;
-}
-
-static void avatar_update_source(void)
-{
-    if (s_benchmark_avatar == NULL) {
-        return;
-    }
-    bool use_rgb565 = s_avatar_rgb565_requested && avatar_rgb565_compatible();
-    const void *desired = use_rgb565 ? (const void *)s_avatar_rgb565
-                                     : (const void *)&img_demo_widgets_avatar;
-    if (lv_image_get_src(s_benchmark_avatar) != desired) {
-        lv_image_set_src(s_benchmark_avatar, desired);
-        ESP_LOGI(TAG, "Profile avatar source: %s", use_rgb565 ? "rgb565" : "original");
-    }
-}
-
-static void avatar_prepare_rgb565(lv_obj_t *tabview)
-{
-    if (s_benchmark_avatar == NULL) {
-        return;
-    }
-    const lv_image_dsc_t *original = &img_demo_widgets_avatar;
-    if (original->header.cf != LV_COLOR_FORMAT_ARGB8888 ||
-        original->header.w == 0 || original->header.h == 0) {
-        ESP_LOGW(TAG, "Profile avatar conversion unavailable: unexpected source format");
-        return;
-    }
-
-    lv_obj_update_layout(tabview);
-    lv_obj_t *panel = lv_obj_get_parent(s_benchmark_avatar);
-    s_avatar_background = lv_obj_get_style_bg_color(panel, LV_PART_MAIN);
-    uint32_t stride = lv_draw_buf_width_to_stride(original->header.w, LV_COLOR_FORMAT_RGB565);
-    size_t buffer_size = (size_t)stride * original->header.h;
-    void *buffer = heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (buffer == NULL) {
-        ESP_LOGW(TAG, "Profile avatar conversion unavailable: no PSRAM");
-        return;
-    }
-    s_avatar_canvas = lv_canvas_create(lv_screen_active());
-    if (s_avatar_canvas == NULL) {
-        heap_caps_free(buffer);
-        ESP_LOGW(TAG, "Profile avatar conversion unavailable: canvas allocation failed");
-        return;
-    }
-    lv_obj_add_flag(s_avatar_canvas, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_canvas_set_buffer(s_avatar_canvas, buffer, original->header.w, original->header.h,
-                         LV_COLOR_FORMAT_RGB565);
-    lv_canvas_fill_bg(s_avatar_canvas, s_avatar_background, LV_OPA_COVER);
-
-    /* Use LVGL's own renderer to preserve its ARGB8888-to-RGB565 blending. */
-    lv_layer_t layer;
-    lv_canvas_init_layer(s_avatar_canvas, &layer);
-    lv_draw_image_dsc_t image_dsc;
-    lv_draw_image_dsc_init(&image_dsc);
-    image_dsc.src = original;
-    const lv_area_t area = {0, 0, original->header.w - 1, original->header.h - 1};
-    lv_draw_image(&layer, &image_dsc, &area);
-    lv_canvas_finish_layer(s_avatar_canvas, &layer);
-    s_avatar_rgb565 = lv_canvas_get_image(s_avatar_canvas);
-    s_avatar_rgb565_requested = true;
-    avatar_update_source();
-    ESP_LOGI(TAG, "Profile avatar RGB565 prepared in %u bytes of PSRAM; active %s",
-             (unsigned)buffer_size,
-             lv_image_get_src(s_benchmark_avatar) == s_avatar_rgb565 ? "yes" : "no");
-}
-
-static void benchmark_start(lv_obj_t *tabview, bool transport)
-{
-    if (s_benchmark_active) {
-        ESP_LOGW(TAG, "Scroll benchmark already running");
-        return;
-    }
-    if (transport) {
-        s_benchmark_target = transport_screen_show(s_demo_screen);
-    } else {
-        transport_screen_hide();
-        lv_screen_load(s_demo_screen);
-        lv_tabview_set_active(tabview, 0, LV_ANIM_OFF);
-        s_benchmark_profile = lv_obj_get_child(lv_tabview_get_content(tabview), 0);
-        s_benchmark_target = s_benchmark_profile;
-    }
-    if (s_benchmark_target == NULL) {
-        ESP_LOGW(TAG, "Scroll benchmark: target not found");
-        return;
-    }
-    lv_obj_update_layout(lv_screen_active());
-    lv_obj_scroll_to_y(s_benchmark_target, 0, LV_ANIM_OFF);
-    lv_obj_update_layout(lv_screen_active());
-    s_benchmark_scroll_max = lv_obj_get_scroll_bottom(s_benchmark_target);
-    if (s_benchmark_scroll_max < BENCHMARK_STEPS / 2) {
-        ESP_LOGW(TAG, "Scroll benchmark: profile has insufficient scroll range (%ld px)",
-                 (long)s_benchmark_scroll_max);
-        return;
-    }
-
-    s_benchmark_transport = transport;
-    if (transport) transport_screen_set_updates_paused(true);
-    s_benchmark_active = true;
-    s_benchmark_setup = true;
-    s_benchmark_step = 0;
-    s_benchmark_last_frame = s_lvgl_frame_count;
-    s_benchmark_last_progress_us = esp_timer_get_time();
-    /* Force a complete setup refresh before starting the timed steps. */
-    lv_obj_invalidate(s_benchmark_target);
-    ESP_LOGI(TAG, "Scroll benchmark starting: %s, %u steps, range %ld px, tiles %u, avatar %s, format %s, effects %s, touch %u ms; do not touch",
-             transport ? "transport" : "profile", BENCHMARK_STEPS, (long)s_benchmark_scroll_max,
-             (unsigned)lv_display_get_tile_cnt(NULL),
-             s_benchmark_avatar_hidden ? "hidden" : "normal",
-             s_benchmark_avatar && lv_image_get_src(s_benchmark_avatar) == s_avatar_rgb565
-                 ? "rgb565" : "original",
-             s_benchmark_effects_simple ? "simple" : "normal",
-             (unsigned)s_touch_period_ms);
-}
-
-/* Change only Profile's main-part theme radius/shadow, not the whole demo. */
-static void benchmark_set_simple_effects(lv_obj_t *obj, bool simple,
-                                         unsigned *changed)
-{
-    int32_t radius_before = lv_obj_get_style_radius(obj, LV_PART_MAIN);
-    int32_t shadow_before = lv_obj_get_style_shadow_width(obj, LV_PART_MAIN);
-    if (simple) {
-        lv_obj_add_style(obj, &s_benchmark_simple_effects_style, LV_PART_MAIN);
-    } else {
-        lv_obj_remove_style(obj, &s_benchmark_simple_effects_style, LV_PART_MAIN);
-    }
-    if (radius_before != lv_obj_get_style_radius(obj, LV_PART_MAIN) ||
-        shadow_before != lv_obj_get_style_shadow_width(obj, LV_PART_MAIN)) {
-        (*changed)++;
-    }
-    uint32_t count = lv_obj_get_child_count(obj);
-    for (uint32_t i = 0; i < count; i++) {
-        benchmark_set_simple_effects(lv_obj_get_child(obj, (int32_t)i), simple, changed);
-    }
-}
-
-static void benchmark_command(char command, lv_display_t *display, lv_obj_t *tabview)
-{
-    if (command == 'b') {
-        benchmark_start(tabview, false);
-        return;
-    }
-    if (command == 'c') {
-        benchmark_start(tabview, true);
-        return;
-    }
-    if (s_benchmark_active) {
-        ESP_LOGW(TAG, "Scroll benchmark config failed: benchmark running");
-        return;
-    }
-    if (command == 't') {
-        (void)transport_screen_show(s_demo_screen);
-        ESP_LOGI(TAG, "Showing fictional transport prototype");
-    } else if (command == 'd') {
-        transport_screen_hide();
-        lv_screen_load(s_demo_screen);
-        ESP_LOGI(TAG, "Showing widgets demo");
-    } else if (command == 'i' || command == 'j') {
-        if (s_touch_timer == NULL) {
-            ESP_LOGW(TAG, "Scroll benchmark config failed: touch unavailable");
-            return;
-        }
-        s_touch_period_ms = command == 'i' ? 10 : 30;
-        lv_timer_set_period(s_touch_timer, s_touch_period_ms);
-        lv_timer_reset(s_touch_timer);
-        s_touch_last_read_us = 0;
-        s_touch_interval_sum_us = 0;
-        s_touch_interval_count = 0;
-        s_touch_interval_max_us = 0;
-        ESP_LOGI(TAG, "Scroll benchmark config: touch %u ms", (unsigned)s_touch_period_ms);
-    } else if (command == '2' || command == '4') {
-        lv_display_set_tile_cnt(display, (uint32_t)(command - '0'));
-        ESP_LOGI(TAG, "Scroll benchmark config: tiles %u",
-                 (unsigned)lv_display_get_tile_cnt(display));
-    } else if (command == 'o' || command == 'r') {
-        if (s_benchmark_avatar == NULL ||
-            (command == 'r' && s_avatar_rgb565 == NULL)) {
-            ESP_LOGW(TAG, "Scroll benchmark config failed: requested avatar format unavailable");
-            return;
-        }
-        s_avatar_rgb565_requested = command == 'r';
-        avatar_update_source();
-        bool using_rgb565 = lv_image_get_src(s_benchmark_avatar) == s_avatar_rgb565;
-        if (s_avatar_rgb565_requested && !using_rgb565) {
-            ESP_LOGW(TAG, "Scroll benchmark config failed: avatar background incompatible with RGB565");
-            return;
-        }
-        ESP_LOGI(TAG, "Scroll benchmark config: format %s", using_rgb565 ? "rgb565" : "original");
-    } else if (command == 'h' || command == 's') {
-        if (s_benchmark_avatar == NULL) {
-            ESP_LOGW(TAG, "Scroll benchmark config failed: avatar not found");
-            return;
-        }
-        bool hide = command == 'h';
-        if (hide != s_benchmark_avatar_hidden) {
-            if (hide) {
-                lv_obj_add_style(s_benchmark_avatar, &s_benchmark_hide_avatar_style, LV_PART_MAIN);
-            } else {
-                lv_obj_remove_style(s_benchmark_avatar, &s_benchmark_hide_avatar_style, LV_PART_MAIN);
-            }
-            s_benchmark_avatar_hidden = hide;
-        }
-        ESP_LOGI(TAG, "Scroll benchmark config: avatar %s",
-                 s_benchmark_avatar_hidden ? "hidden" : "normal");
-        if (hide && lv_obj_get_style_image_opa(s_benchmark_avatar, LV_PART_MAIN) != LV_OPA_TRANSP) {
-            ESP_LOGW(TAG, "Scroll benchmark config failed: avatar opacity was not overridden");
-        }
-    } else if (command == 'e' || command == 'n') {
-        if (s_benchmark_profile == NULL) {
-            ESP_LOGW(TAG, "Scroll benchmark config failed: profile not found");
-            return;
-        }
-        bool simple = command == 'e';
-        unsigned changed = 0;
-        if (simple != s_benchmark_effects_simple) {
-            benchmark_set_simple_effects(s_benchmark_profile, simple, &changed);
-            s_benchmark_effects_simple = simple;
-        }
-        ESP_LOGI(TAG, "Scroll benchmark config: effects %s, changed %u objects",
-                 s_benchmark_effects_simple ? "simple" : "normal", changed);
-    }
-}
-
-static void benchmark_poll(void)
-{
-    if (!s_benchmark_active) {
-        return;
-    }
-    int64_t now_us = esp_timer_get_time();
-    if (s_lvgl_frame_count == s_benchmark_last_frame) {
-        if (now_us - s_benchmark_last_progress_us > BENCHMARK_TIMEOUT_US) {
-            ESP_LOGW(TAG, "Scroll benchmark timed out at step %u", (unsigned)s_benchmark_step);
-            s_benchmark_active = false;
-            if (s_benchmark_transport) transport_screen_set_updates_paused(false);
-        }
-        return;
-    }
-    s_benchmark_last_progress_us = now_us;
-    s_benchmark_last_frame = s_lvgl_frame_count;
-
-    if (s_benchmark_setup) {
-        s_benchmark_setup = false;
-        s_benchmark_first_frame = s_lvgl_frame_count;
-        s_benchmark_start_us = now_us;
-        s_benchmark_prepare_start_us = s_lvgl_prepare_us;
-        s_benchmark_render_start_us = s_lvgl_render_us;
-        s_benchmark_sync_start_us = s_lvgl_sync_wait_us;
-        s_benchmark_refresh_start_us = s_lvgl_refresh_us;
-        s_benchmark_pixels_start = s_lvgl_drawn_pixels;
-        s_benchmark_regions_start = s_lvgl_drawn_regions;
-    } else if (s_benchmark_step == BENCHMARK_STEPS) {
-        uint32_t frames = s_lvgl_frame_count - s_benchmark_first_frame;
-        uint64_t prepare = s_lvgl_prepare_us - s_benchmark_prepare_start_us;
-        uint64_t render = s_lvgl_render_us - s_benchmark_render_start_us;
-        uint64_t sync = s_lvgl_sync_wait_us - s_benchmark_sync_start_us;
-        uint64_t refresh = s_lvgl_refresh_us - s_benchmark_refresh_start_us;
-        ESP_LOGI(TAG, "Scroll benchmark: %u steps, %u updates, range %ld px, elapsed %u ms",
-                 BENCHMARK_STEPS, (unsigned)frames, (long)s_benchmark_scroll_max,
-                 (unsigned)((now_us - s_benchmark_start_us) / 1000));
-        ESP_LOGI(TAG, "Scroll benchmark areas: avg %u pixels and %u regions per update",
-                 (unsigned)(frames ? (s_lvgl_drawn_pixels - s_benchmark_pixels_start) / frames : 0),
-                 (unsigned)(frames ? (s_lvgl_drawn_regions - s_benchmark_regions_start) / frames : 0));
-        ESP_LOGI(TAG, "Scroll benchmark per update: prepare %u ms, draw/other %u ms, sync %u ms, total %u ms",
-                 (unsigned)(frames ? prepare / frames / 1000 : 0),
-                 (unsigned)(frames ? render / frames / 1000 : 0),
-                 (unsigned)(frames ? sync / frames / 1000 : 0),
-                 (unsigned)(frames ? refresh / frames / 1000 : 0));
-        s_benchmark_active = false;
-        if (s_benchmark_transport) transport_screen_set_updates_paused(false);
-        return;
-    }
-
-    s_benchmark_step++;
-    uint32_t position = s_benchmark_step <= BENCHMARK_STEPS / 2
-                            ? s_benchmark_step
-                            : BENCHMARK_STEPS - s_benchmark_step;
-    int32_t y = (int32_t)((int64_t)s_benchmark_scroll_max * position /
-                          (BENCHMARK_STEPS / 2));
-    lv_obj_scroll_to_y(s_benchmark_target, y, LV_ANIM_OFF);
+    /* Both the flush callback and benchmark timer run on the LVGL task. */
+    return s_lvgl_frame_count;
 }
 
 static void lvgl_task(void *arg)
@@ -841,47 +514,18 @@ static void lvgl_task(void *arg)
         }
     }
 
-    lv_demo_widgets();
-    s_demo_screen = lv_screen_active();
-    /* The widgets demo creates its tab view as the first screen child. */
-    lv_obj_t *tabview = lv_obj_get_child(lv_screen_active(), 0);
-    bool valid_tabview = tabview && lv_obj_check_type(tabview, &lv_tabview_class);
-    if (valid_tabview) {
-        s_benchmark_profile = lv_obj_get_child(lv_tabview_get_content(tabview), 0);
-        lv_obj_t *profile_panel = s_benchmark_profile
-                                      ? lv_obj_get_child(s_benchmark_profile, 0)
-                                      : NULL;
-        lv_obj_t *avatar = profile_panel ? lv_obj_get_child(profile_panel, 0) : NULL;
-        if (avatar && lv_obj_check_type(avatar, &lv_image_class) &&
-            lv_image_get_src(avatar) == &img_demo_widgets_avatar) {
-            s_benchmark_avatar = avatar;
-        }
-        avatar_prepare_rgb565(tabview);
-    }
-    int benchmark_console = open("/dev/uart/0", O_RDONLY | O_NONBLOCK);
-    if (benchmark_console < 0 || !valid_tabview) {
-        if (benchmark_console >= 0) {
-            close(benchmark_console);
-        }
-        benchmark_console = -1;
-        ESP_LOGW(TAG, "Scroll benchmark console unavailable");
-    } else {
-        lv_style_init(&s_benchmark_hide_avatar_style);
-        lv_style_set_image_opa(&s_benchmark_hide_avatar_style, LV_OPA_TRANSP);
-        lv_style_init(&s_benchmark_simple_effects_style);
-        lv_style_set_radius(&s_benchmark_simple_effects_style, 0);
-        lv_style_set_shadow_width(&s_benchmark_simple_effects_style, 0);
-        ESP_LOGI(TAG, "Serial: t=transport, d=demo, b=profile benchmark, c=transport benchmark, i/j=10/30 ms touch");
-    }
+    benchmark_screen_create(benchmark_present_count);
 #ifdef APP_LVGL_O3
     ESP_LOGI(TAG, "LVGL compiler optimization: -O3");
 #else
     ESP_LOGI(TAG, "LVGL compiler optimization: -O2");
 #endif
-    ESP_LOGI(TAG, "LVGL widgets demo running on the 800x480 panel at %u MHz PCLK",
+    ESP_LOGI(TAG, "Animation benchmark running on the 800x480 panel at %u MHz PCLK",
              (unsigned)(LCD_PIXEL_CLOCK_HZ / 1000000));
     ESP_LOGI(TAG, "LVGL direct mode: two %u-byte PSRAM framebuffers",
              (unsigned)frame_buffer_size);
+    ESP_LOGI(TAG, "Timing: FreeRTOS tick %u Hz, LVGL configured default %u ms; benchmark alternates 33/25 ms",
+             (unsigned)CONFIG_FREERTOS_HZ, (unsigned)CONFIG_LV_DEF_REFR_PERIOD);
     ESP_LOGI(TAG, "PSRAM detected: %u bytes", (unsigned)esp_psram_get_size());
 
     uint64_t last_diagnostics_ms = esp_timer_get_time() / 1000;
@@ -896,16 +540,12 @@ static void lvgl_task(void *arg)
     uint64_t last_refresh_us = 0;
     uint64_t last_drawn_pixels = 0;
     uint64_t last_drawn_regions = 0;
+    uint64_t delay_requested_sum_us = 0;
+    uint64_t delay_actual_sum_us = 0;
+    uint32_t delay_count = 0;
+    uint32_t delay_actual_max_us = 0;
     while (true) {
         uint32_t delay_ms = lv_timer_handler();
-        avatar_update_source();
-        if (benchmark_console >= 0) {
-            char command;
-            if (read(benchmark_console, &command, 1) == 1) {
-                benchmark_command(command, display, tabview);
-            }
-        }
-        benchmark_poll();
         uint64_t now_ms = esp_timer_get_time() / 1000;
         if (now_ms - last_diagnostics_ms >= LCD_DIAGNOSTICS_PERIOD_MS) {
             portENTER_CRITICAL(&s_frame_stats_lock);
@@ -940,6 +580,26 @@ static void lvgl_task(void *arg)
                          (long)s_lvgl_largest_region.x2, (long)s_lvgl_largest_region.y2,
                          (unsigned)s_lvgl_largest_region_pixels);
             }
+            if (s_present_interval_count) {
+                ESP_LOGI(TAG, "Present interval: avg %u ms, min %u ms, max %u ms (%u intervals)",
+                         (unsigned)(s_present_interval_sum_us / s_present_interval_count / 1000),
+                         (unsigned)(s_present_interval_min_us / 1000),
+                         (unsigned)(s_present_interval_max_us / 1000),
+                         (unsigned)s_present_interval_count);
+            }
+            if (s_refresh_gap_count) {
+                ESP_LOGI(TAG, "Between presented refreshes: avg %u ms, max %u ms (%u gaps)",
+                         (unsigned)(s_refresh_gap_sum_us / s_refresh_gap_count / 1000),
+                         (unsigned)(s_refresh_gap_max_us / 1000),
+                         (unsigned)s_refresh_gap_count);
+            }
+            if (delay_count) {
+                ESP_LOGI(TAG, "LVGL task delay: requested avg %u ms, actual avg %u ms, max %u ms (%u delays)",
+                         (unsigned)(delay_requested_sum_us / delay_count / 1000),
+                         (unsigned)(delay_actual_sum_us / delay_count / 1000),
+                         (unsigned)(delay_actual_max_us / 1000),
+                         (unsigned)delay_count);
+            }
             if (s_touch_interval_count) {
                 ESP_LOGI(TAG, "Touch poll: configured %u ms, observed avg %u ms, max %u ms",
                          (unsigned)s_touch_period_ms,
@@ -961,6 +621,17 @@ static void lvgl_task(void *arg)
             last_drawn_regions = s_lvgl_drawn_regions;
             s_lvgl_refresh_max_us = 0;
             s_lvgl_largest_region_pixels = 0;
+            s_present_interval_sum_us = 0;
+            s_present_interval_count = 0;
+            s_present_interval_min_us = 0;
+            s_present_interval_max_us = 0;
+            s_refresh_gap_sum_us = 0;
+            s_refresh_gap_count = 0;
+            s_refresh_gap_max_us = 0;
+            delay_requested_sum_us = 0;
+            delay_actual_sum_us = 0;
+            delay_count = 0;
+            delay_actual_max_us = 0;
             s_touch_interval_sum_us = 0;
             s_touch_interval_count = 0;
             s_touch_interval_max_us = 0;
@@ -974,7 +645,15 @@ static void lvgl_task(void *arg)
         if (delay_ticks == 0) {
             delay_ticks = 1;
         }
+        uint64_t delay_start_us = (uint64_t)esp_timer_get_time();
         vTaskDelay(delay_ticks);
+        uint32_t actual_delay_us = (uint32_t)((uint64_t)esp_timer_get_time() - delay_start_us);
+        delay_requested_sum_us += (uint64_t)delay_ticks * 1000000 / CONFIG_FREERTOS_HZ;
+        delay_actual_sum_us += actual_delay_us;
+        delay_count++;
+        if (actual_delay_us > delay_actual_max_us) {
+            delay_actual_max_us = actual_delay_us;
+        }
     }
 }
 

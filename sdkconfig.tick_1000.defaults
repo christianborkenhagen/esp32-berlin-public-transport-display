@@ -1,0 +1,2 @@
+# Controlled scheduler-tick A/B test; all other defaults remain unchanged.
+CONFIG_FREERTOS_HZ=1000
