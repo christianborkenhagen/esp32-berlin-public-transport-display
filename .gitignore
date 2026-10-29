@@ -2,10 +2,13 @@
 sdkconfig
 sdkconfig.old
 sdkconfig.crowpanel_advance_5_v1_1
+sdkconfig.crowpanel_advance_5_v1_1_o3
 managed_components/
 build/
 *.bin
 *.elf
 *.map
+__pycache__/
+*.pyc
 .vscode/c_cpp_properties.json
 .vscode/launch.json

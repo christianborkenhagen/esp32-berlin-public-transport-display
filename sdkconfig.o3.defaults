@@ -1,0 +1,3 @@
+# The larger -O3 IRAM image leaves less internal RAM for the draw workers.
+# This is bytes per worker on the ESP-IDF Xtensa port.
+CONFIG_LV_DRAW_THREAD_STACK_SIZE=16384

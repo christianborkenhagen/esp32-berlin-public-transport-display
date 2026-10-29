@@ -10,19 +10,32 @@ CONFIG_SPIRAM_TYPE_AUTO=y
 CONFIG_SPIRAM_SPEED_80M=y
 CONFIG_SPIRAM_USE_MALLOC=y
 
+# Match Elecrow's V1.1 CPU/cache-line settings for RGB bounce-buffer scanout.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
 # Keep the test image and future application data in a project-owned table.
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
 # LVGL 9 widgets demo configuration (the panel uses RGB565).
 CONFIG_LV_COLOR_DEPTH_16=y
-CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_BUILD_EXAMPLES=y
 CONFIG_LV_BUILD_DEMOS=y
 CONFIG_LV_USE_DEMO_WIDGETS=y
 CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_18=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_MEM_SIZE_KILOBYTES=64
+# Run LVGL's software drawing workers in parallel on the two cores.
+CONFIG_LV_OS_FREERTOS=y
+CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=2
+# This ESP-IDF Xtensa port uses a one-byte StackType_t, so LVGL 9.4's
+# FreeRTOS wrapper allocates this many bytes for each worker stack.
+CONFIG_LV_DRAW_THREAD_STACK_SIZE=32768
+# Move LVGL's marked hot drawing functions to internal instruction RAM.
+CONFIG_LV_ATTRIBUTE_FAST_MEM_USE_IRAM=y
 
-# Recover RGB scanout at VSYNC if DMA bandwidth pressure causes desynchronization.
-CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
+# Use the driver's automatic recovery rather than restarting at every VSYNC.
+CONFIG_LCD_RGB_RESTART_IN_VSYNC=n

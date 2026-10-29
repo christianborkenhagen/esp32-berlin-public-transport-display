@@ -7,18 +7,50 @@ PlatformIO / ESP-IDF project for the **Elecrow CrowPanel Advance 5.0 V1.1**
 
 The firmware configures the board for 16 MB QIO flash and octal PSRAM, uses the
 project partition table, turns on the V1.1 backlight controller, and initializes
-the 800×480 RGB panel. It then starts LVGL 9.4.0's widgets demo using one
-full-screen RGB565 framebuffer in PSRAM, two 20-line LVGL draw buffers in
-internal RAM, and the RGB driver's 10-line bounce buffers. LVGL renders partial
-areas and the RGB driver copies them into the framebuffer. When the GT911
+the 800×480 RGB panel. It then starts LVGL 9.4.0's widgets demo using two
+full-screen RGB565 framebuffers in PSRAM and the RGB driver's 20-line bounce
+buffers in internal RAM. LVGL renders into the inactive framebuffer in direct
+mode. After the last dirty area, a worker on the LCD interrupt core switches
+framebuffers and waits for the next bounce-frame completion before LVGL reuses
+the previous buffer. Sharing a core prevents a completion for the old frame
+from racing with the switch. When the GT911
 responds at I²C address `0x5D`, the firmware polls it for touch coordinates so
 the demo controls can be used. The LVGL worker runs on core 1; touch is polled at
 30 ms over 400 kHz I²C, with short transaction timeouts so a missing touch
 response cannot stall the UI for a long period.
 
+The default build compiles the LVGL component with `-O2` and places LVGL's marked
+performance-sensitive functions in internal instruction RAM; the rest of the
+firmware keeps the configured ESP-IDF compiler optimization level. This uses
+internal RAM and may make LVGL code harder to step through in a debugger.
+LVGL uses two FreeRTOS software-rendering workers. On this ESP-IDF Xtensa
+port `StackType_t` is one byte, so the default configuration allocates
+32 KiB of stack per worker.
+An additional 48 KiB LVGL allocation pool in PSRAM supplements the 64 KiB
+internal pool for temporary rendering allocations. A startup message reports
+whether the extra pool was added successfully.
+
+The demo's Profile avatar is precomposited with LVGL onto its solid panel
+background as RGB565 in PSRAM, avoiding repeated alpha blending while scrolling.
+The original ARGB8888 image remains available; the firmware falls back to it
+for selected incompatible background, transform, geometry, opacity, or
+recolor changes. The RGB565 buffer costs about 48 KiB of PSRAM.
+
 ESP-IDF Component Manager downloads LVGL from the manifest in
-`src/idf_component.yml` on the first build. The widget demo and its fonts are
-enabled in `sdkconfig.defaults`.
+`src/idf_component.yml` on the first build. The widget demo, its fonts, and
+LVGL's separate examples are enabled in `sdkconfig.defaults`. The firmware
+still starts the widgets demo; enabling the examples makes them available for
+use but does not run one automatically.
+
+## Transport-screen prototype
+
+Send `t` in the serial monitor to open a simple, scrollable departures screen.
+It uses **fictional, simulated data**, not a transport API: one displayed
+departure time changes every five seconds while the screen is active. The
+screen uses opaque backgrounds, simple shapes, and small individual label
+updates. Use its **Widgets** button or send `d` to return to the widgets demo.
+The prototype is released when leaving it; the existing panel and framebuffer
+synchronization are unchanged.
 
 ## Build, upload, and monitor
 
@@ -38,6 +70,62 @@ Use the board's programming USB connection for upload. The display should show
 LVGL's Profile, Analytics, and Shop tabs. Touch the screen to explore the
 widgets. The serial monitor reports whether the touch controller and backlight
 controller responded over I²C.
+
+For a repeatable performance comparison, send `b` through the serial monitor
+and don't touch the display until the benchmark finishes. It selects Profile
+and performs 40 fixed scrolling steps down and back up, logging the scroll
+range, elapsed time, and average refresh timings. Compare runs with the same
+scroll range; this synthetic test complements rather than replaces a visual
+check for smoothness and flicker. Alternatively, with the monitor closed, run
+`python tools/run_scroll_benchmark.py COMx` using an environment that has
+`pyserial` installed (such as PlatformIO's Python environment).
+Optional `--tiles 2|4`, `--avatar normal|hidden`,
+`--avatar-format original|rgb565`, and
+`--effects normal|simple` arguments select A/B test settings before the run.
+Use `--screen transport` (or send `c` in the monitor) to run the same 40-step
+test on the prototype; its simulated updates pause during the test. Compare
+repeated runs of the *same* screen and scroll range: Profile and the prototype
+have different content, dimensions, and ranges, so their times are not a
+controlled widget-for-widget comparison.
+Hiding the Profile avatar preserves its layout; simple effects override
+main-part theme radius and shadow on Profile objects (local styles and other
+parts can still take precedence). These settings persist until changed or the
+board resets. Restore the normal appearance with `--avatar normal`,
+`--avatar-format rgb565`, and `--effects normal`. Always compare results with
+identical scroll ranges.
+
+For a touch-responsiveness experiment, send `i` for a 10 ms polling period or
+`j` to restore the 30 ms default. The script also accepts `--touch 10|30`.
+The diagnostics report observed intervals between reads; these include delays
+when the LVGL task is busy and are **not** input-to-photon latency. Compare
+manual touch behavior as well as the logs; faster polling does not guarantee
+faster rendering.
+
+The separate `crowpanel_advance_5_v1_1_o3` PlatformIO environment builds the
+LVGL component at `-O3` instead of `-O2`. For example:
+
+```powershell
+pio run -e crowpanel_advance_5_v1_1_o3
+pio run -e crowpanel_advance_5_v1_1_o3 -t upload --upload-port COM6
+```
+
+The regular environment remains `-O2`; the startup log identifies the chosen
+level. The `-O3` environment uses `sdkconfig.o3.defaults` to set each worker
+stack to 16 KiB on a fresh configuration. The larger `-O3` instruction-RAM
+image leaves insufficient internal memory for both 32 KiB worker stacks on
+this board; a missing worker can make the first screen hang.
+
+Generated `sdkconfig` files take precedence over defaults. If an existing
+`-O3` configuration has the old 32 KiB setting, set
+`CONFIG_LV_DRAW_THREAD_STACK_SIZE=16384` using
+`pio run -e crowpanel_advance_5_v1_1_o3 -t menuconfig`. The build rejects the
+known-problematic 32 KiB-or-larger setting in this environment.
+
+For a comparison, keep the other settings equivalent, run the same benchmark
+several times, and check memory use, touch behavior, tab switching, and flicker.
+The stack sizes differ, so this is not a pure compiler-flag comparison.
+On the transport scroll benchmark, the tested `-O3` build was not
+meaningfully faster than `-O2`; `-O3` remains experimental.
 
 ## VS Code note
 
@@ -101,13 +189,38 @@ connection by asking it to use the build123d MCP tools to create and render a
   is the panel scan rate; LVGL can render fewer frames if widget drawing becomes
   the limit. The ST7262 datasheet's generic RGB timing table lists 23–27 MHz,
   while Elecrow's board-specific V1.1 ESP-IDF example configures 16 MHz.
-- The RGB panel uses one 750 KiB framebuffer in PSRAM, two 20-line LVGL draw
-  buffers in internal RAM, and two 10-line ESP-IDF bounce buffers in internal
-  RAM. LVGL renders dirty areas into the draw buffers; the driver copies them
-  into the framebuffer, then copies framebuffer lines into the bounce buffers
-  for DMA scanout. At 39.0 fps, active 16-bit pixels amount to about 30 MB/s of
-  framebuffer reads. The ESP-IDF driver is configured to restart scanout at
-  VSYNC if it detects a DMA desynchronization.
+- The RGB panel uses two 750 KiB framebuffers in PSRAM and two 20-line ESP-IDF
+  bounce buffers in internal RAM. LVGL renders dirty areas into the inactive
+  framebuffer; the RGB driver copies the displayed framebuffer into bounce
+  buffers for DMA scanout. At 39.0 fps, active 16-bit pixels amount to about
+  30 MB/s of framebuffer reads. The ESP-IDF driver is configured to restart
+  scanout automatically when it detects a missed bounce-buffer completion,
+  rather than unconditionally restarting at every VSYNC. A delayed restart can
+  itself cause a transient shift.
+- The CPU runs at 240 MHz and the data cache uses 64-byte lines, matching
+  Elecrow's V1.1 example. Espressif recommends 64-byte cache lines and larger
+  bounce buffers in this mode to reduce RGB scanout drift. Every five seconds,
+  serial diagnostics report VSYNC events, completed bounce frames, and LVGL
+  updates. For intervals with updates, they also report average per-update
+  preparation (including layout and synchronization of dirty areas between
+  buffers), drawing/other work, framebuffer-switch wait, and total refresh
+  time, plus the maximum refresh time. The draw/other figure includes refresh
+  bookkeeping and excludes the measured switch wait; it is not a pure CPU
+  drawing benchmark. Diagnostics also report free internal heap and the
+  largest available internal block, to help assess the RAM cost of IRAM code
+  and bounce buffers. These counters can help identify bottlenecks or missed
+  frame completions but do not prove the image is free of visual artifacts.
+- Area diagnostics sum the clipped regions passed to LVGL's flush callback
+  and report their average size/count per update and the largest rectangle
+  during the interval. This is a coarse measure of redraw work, not a
+  per-widget time profile; overlapping regions can be counted more than once.
+- The double-buffer approach follows the V1.1
+  [Elecrow LVGL reference](https://github.com/Elecrow-RD/CrowPanel-Advance-5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-800x480/tree/master/example/V1.1/ESP_IDF/Lesson03-LVGL_Control_LED)
+  and Espressif's
+  [LVGL RGB display port](https://github.com/espressif/esp-bsp/blob/bba9438/components/esp_lvgl_port/src/lvgl9/esp_lvgl_port_disp.c).
+  Tearing during updates, RGB data starvation, panel timing, and backlight
+  behavior are distinct possible causes of apparent flicker; verify changes
+  on the physical display rather than assuming they have the same cause.
 - The GPIO map and V1.1 I²C controller details follow [Elecrow's board
   documentation](https://elecrow.com/wiki/CrowPanel_Advance_5.0-HMI_ESP32_AI_Display.html).
   The pixel clock range follows the [ST7262 datasheet](https://www.orientdisplay.com/wp-content/uploads/2020/11/ST7262.pdf).
