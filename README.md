@@ -122,7 +122,62 @@ explicitly if the required statistics are disabled.
 Existing configurations may also retain `CONFIG_LV_BUILD_EXAMPLES=y`; disable
 it in each environment's menuconfig to stop building the examples.
 
-### Scheduler tick A/B test
+## Windows development simulator
+
+The desktop application is separate from the ESP32 firmware and does not
+require flashing. Its window coordinates are 800 × 480 logical pixels;
+Windows DPI scaling can change the physical window size. Mouse clicks and
+drags replace touchscreen input. The simulator does not reproduce the CrowPanel
+RGB bus, PSRAM bandwidth, scanout synchronization, touch controller, or
+ESP32 performance.
+
+### Existing LVGL screens on Windows
+
+The native Windows port compiles **the same** `src/transport_screen.c` and
+`src/benchmark_screen.c` against LVGL 9.4.0. The transport screen still has
+its original fictional data and no station tabs. Run the executable with
+`--transport` or `--benchmark`; without an argument it opens a menu. The
+transport screen's **Widgets** button returns to that menu.
+
+The following PowerShell example uses the local MSYS2 MinGW64 installation
+and Ninja. A recent MinGW-w64 or MSVC compiler, CMake, and a compatible build
+tool are required; an old Strawberry Perl GCC is not sufficient for LVGL's
+Windows APIs. If needed, adapt the tool paths:
+
+```powershell
+$env:PATH = 'C:\MSYS64\mingw64\bin;' + $env:PATH
+cmake -S desktop/lvgl -B desktop/lvgl/build-win64 -G Ninja `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_C_COMPILER=C:/MSYS64/mingw64/bin/gcc.exe `
+  -DCMAKE_CXX_COMPILER=C:/MSYS64/mingw64/bin/g++.exe
+cmake --build desktop/lvgl/build-win64 -j 8
+
+.\desktop\lvgl\build-win64\lvgl_pc.exe --transport
+.\desktop\lvgl\build-win64\lvgl_pc.exe --benchmark
+# Optional: choose the first benchmark scene (0–7):
+.\desktop\lvgl\build-win64\lvgl_pc.exe --benchmark --scene 5
+```
+
+The build uses `managed_components/lvgl__lvgl` from the PlatformIO build if
+available and checks its version. Otherwise CMake downloads the `v9.4.0` tag
+from the LVGL repository, so the first configure needs network access. The
+Windows backend has its own framebuffer and threading configuration; it is not
+the ESP-IDF display driver. Benchmark output counts PC LVGL refreshes that
+flush at least one area, **not** ESP32 framebuffer switches or screen FPS.
+The PC version does not estimate ESP32 CPU usage. Its console also shows the
+number of static-scene redraw timer callbacks in the sampling interval. The
+initial window paint can appear in the first idle sample. For a short launch
+check add `--smoke-test`.
+
+### MicroPython + LVGL prototype
+
+A separate experimental **MicroPython + LVGL** version, with two station tabs,
+simulated departures and benchmark scenes, is in
+[`firmware/micropython/README.md`](firmware/micropython/README.md). It requires
+a custom MicroPython image and has not yet been tested on the device.
+The Windows LVGL simulator above runs the native C UI, not this Python app.
+
+## ESP32 scheduler tick A/B test
 
 The default `crowpanel_advance_5_v1_1` environment uses a 100 Hz FreeRTOS
 tick; `crowpanel_advance_5_v1_1_tick1000` uses 1000 Hz. Both use the same

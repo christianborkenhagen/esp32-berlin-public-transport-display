@@ -2,5 +2,7 @@
     // PlatformIO owns the build and invokes ESP-IDF's CMake configuration itself.
     // Prevent CMake Tools from starting a separate configure that asks for a kit.
     "cmake.configureOnOpen": false,
-    "cmake.configureOnEdit": false
+    "cmake.configureOnEdit": false,
+    // Use the project environment for Python tools.
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv"
 }

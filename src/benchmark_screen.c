@@ -3,6 +3,16 @@
 #include <math.h>
 #include <stdio.h>
 
+#ifdef APP_WINDOWS_SIMULATOR
+#include <windows.h>
+#include <inttypes.h>
+#include <stdlib.h>
+#define ESP_LOGI(tag, ...) do { printf("[%s] ", tag); printf(__VA_ARGS__); putchar('\n'); } while (0)
+#define ESP_ERROR_CHECK(condition) do { if ((condition) != 0) abort(); } while (0)
+#define ESP_OK 0
+#define ESP_ERR_INVALID_STATE 1
+#define ESP_ERR_NO_MEM 2
+#else
 #include "benchmark_metrics.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -10,13 +20,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/idf_additions.h"
-#include "lvgl.h"
 #include "sdkconfig.h"
 
 #if !CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS || \
     !CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER || CONFIG_FREERTOS_SMP
 #error "The benchmark needs ESP timer-based FreeRTOS runtime stats on both cores"
 #endif
+#endif
+#include "lvgl.h"
 
 #define SCENE_DURATION_MS 12000
 #define SAMPLE_PERIOD_MS 1000
@@ -44,13 +55,24 @@ static lv_obj_t *s_speed_label;
 static lv_obj_t *s_pixel;
 static lv_point_precise_t s_tick_points[9][2];
 static benchmark_frame_count_cb_t s_frame_count;
+#ifndef APP_WINDOWS_SIMULATOR
 static benchmark_metrics_state_t s_metrics;
+#endif
 static unsigned s_scene_index;
 static uint32_t s_refresh_period_ms = REFRESH_BASELINE_MS;
 static lv_timer_t *s_display_refresh_timer;
 static lv_timer_t *s_animation_timer;
 static lv_timer_t *s_redraw_timer;
 static bool s_pixel_on;
+
+#ifdef APP_WINDOWS_SIMULATOR
+static uint32_t s_redraw_requests;
+
+void benchmark_screen_set_initial_scene(unsigned scene)
+{
+    if (scene < SCENE_COUNT) s_scene_index = scene;
+}
+#endif
 
 static void set_refresh_period(uint32_t period_ms)
 {
@@ -281,8 +303,13 @@ static void create_static_scene(unsigned index)
                                        85, 85, s_colors[i]);
         lv_obj_set_style_radius(block, 10, 0);
     }
+#ifdef APP_WINDOWS_SIMULATOR
+    text_label(s_scene, "PC LVGL flush refreshes: console (not panel FPS)",
+               45, 340, &lv_font_montserrat_16, 0xaec8d4);
+#else
     text_label(s_scene, "Live FPS and CPU estimates: serial console",
                45, 340, &lv_font_montserrat_16, 0xaec8d4);
+#endif
 }
 
 static void load_scene(unsigned index)
@@ -292,8 +319,13 @@ static void load_scene(unsigned index)
                           s_scene_names[index]);
     if (index >= STATIC_SCENE_INDEX) {
         lv_label_set_text_fmt(s_metrics_label,
+#ifdef APP_WINDOWS_SIMULATOR
+                              "Static comparison   |   %" LV_PRIu32
+                              " ms   |   PC metrics in console",
+#else
                               "Static comparison   |   %" LV_PRIu32
                               " ms   |   Live metrics in serial",
+#endif
                               s_refresh_period_ms);
     } else {
         lv_label_set_text(s_metrics_label, "Measuring...");
@@ -319,6 +351,9 @@ static void load_scene(unsigned index)
 static void redraw_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+#ifdef APP_WINDOWS_SIMULATOR
+    s_redraw_requests++;
+#endif
     if (s_scene_index == PIXEL_SCENE_INDEX) {
         s_pixel_on = !s_pixel_on;
         lv_obj_set_style_bg_color(s_pixel,
@@ -346,6 +381,30 @@ static void scene_timer_cb(lv_timer_t *timer)
 static void metrics_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+#ifdef APP_WINDOWS_SIMULATOR
+    static uint64_t previous_ms;
+    static uint32_t previous_frames;
+    static uint32_t previous_redraw_requests;
+    uint64_t now_ms = GetTickCount64();
+    uint32_t frames = s_frame_count();
+    if (previous_ms && now_ms > previous_ms) {
+        double refresh_rate = (double)(frames - previous_frames) * 1000.0 /
+                              (double)(now_ms - previous_ms);
+        if (s_scene_index < STATIC_SCENE_INDEX) {
+            lv_label_set_text_fmt(s_metrics_label, "PC refresh: %u.%u/s  |  %" LV_PRIu32 " ms",
+                                  (unsigned)refresh_rate,
+                                  (unsigned)(refresh_rate * 10) % 10,
+                                  s_refresh_period_ms);
+        }
+        ESP_LOGI(TAG, "%s: PC LVGL refresh %.1f/s, redraw requests %" LV_PRIu32
+                 ", period %" LV_PRIu32 " ms",
+                 s_scene_names[s_scene_index], refresh_rate,
+                 s_redraw_requests - previous_redraw_requests, s_refresh_period_ms);
+    }
+    previous_ms = now_ms;
+    previous_frames = frames;
+    previous_redraw_requests = s_redraw_requests;
+#else
     benchmark_metrics_result_t result;
     uint64_t now_us = (uint64_t)esp_timer_get_time();
     uint32_t idle0 = (uint32_t)ulTaskGetIdleRunTimeCounterForCore(0);
@@ -368,6 +427,7 @@ static void metrics_timer_cb(lv_timer_t *timer)
              result.fps_tenths % 10, result.cpu_percent,
              result.cpu_core_percent[0], result.cpu_core_percent[1],
              s_refresh_period_ms);
+#endif
 }
 
 void benchmark_screen_create(benchmark_frame_count_cb_t frame_count)
@@ -405,7 +465,7 @@ void benchmark_screen_create(benchmark_frame_count_cb_t frame_count)
     lv_obj_set_pos(s_scene, 0, 76);
     lv_obj_set_size(s_scene, 800, SCENE_HEIGHT);
     lv_obj_clear_flag(s_scene, LV_OBJ_FLAG_SCROLLABLE);
-    load_scene(0);
+    load_scene(s_scene_index);
     metrics_timer_cb(NULL); /* Establish the first sampling baseline. */
     lv_timer_create(metrics_timer_cb, SAMPLE_PERIOD_MS, NULL);
     lv_timer_create(scene_timer_cb, SCENE_DURATION_MS, NULL);

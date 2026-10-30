@@ -23,7 +23,7 @@ static const departure_t s_departures[DEPARTURE_COUNT] = {
     {"M4", "Hackescher Markt",    0xd52432, 12},
     {"U5", "Alexanderplatz",      0x925c36, 14},
     {"S3", "Ostkreuz",            0x155b9e, 16},
-    {"TXL", "Musterziel",         0xa13131, 18},
+    {"TXL", "Sample destination", 0xa13131, 18},
     {"U6", "Alt-Tegel",           0x7c468a, 20},
 };
 
