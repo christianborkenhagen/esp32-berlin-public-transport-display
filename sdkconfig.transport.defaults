@@ -1,0 +1,18 @@
+# Leave enough internal RAM for the LCD, LVGL, and Wi-Fi tasks.
+CONFIG_LV_DRAW_THREAD_STACK_SIZE=8192
+# Reserve more internal DMA-capable RAM for Wi-Fi; the app adds a PSRAM pool.
+CONFIG_LV_MEM_SIZE_KILOBYTES=32
+# LVGL's TLSF allocator must allow the explicitly added 256 KiB PSRAM pool.
+CONFIG_LV_MEM_POOL_EXPAND_SIZE_KILOBYTES=256
+# The widgets demo requires a larger internal pool and is not used here.
+CONFIG_LV_USE_DEMO_WIDGETS=n
+
+# The full-size TLS receive buffer did not fit in the available internal heap.
+# This moves mbedTLS dynamic allocations to external PSRAM.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# Prefer external RAM for Wi-Fi/lwIP allocations where supported. Keep the
+# internal static receive buffers and matching aggregation window small.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
+CONFIG_ESP_WIFI_RX_BA_WIN=6

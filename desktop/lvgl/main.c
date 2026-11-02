@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <windows.h>
 
 #include "lvgl.h"
@@ -54,11 +55,13 @@ int main(int argc, char **argv)
 {
     bool benchmark = false;
     bool transport = false;
+    bool live_demo = false;
     bool smoke_test = false;
     int scene = -1;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--benchmark") == 0) benchmark = true;
         else if (strcmp(argv[i], "--transport") == 0) transport = true;
+        else if (strcmp(argv[i], "--transport-live-demo") == 0) live_demo = true;
         else if (strcmp(argv[i], "--smoke-test") == 0) smoke_test = true;
         else if (strcmp(argv[i], "--scene") == 0 && i + 1 < argc) {
             char *end;
@@ -70,12 +73,12 @@ int main(int argc, char **argv)
             scene = (int)parsed;
         }
         else {
-            fprintf(stderr, "Usage: lvgl_pc [--transport|--benchmark] [--scene 0-7] [--smoke-test]\n");
+            fprintf(stderr, "Usage: lvgl_pc [--transport|--transport-live-demo|--benchmark] [--scene 0-7] [--smoke-test]\n");
             return 2;
         }
     }
-    if ((benchmark && transport) || (scene >= 0 && !benchmark)) {
-        fprintf(stderr, "Choose either --transport or --benchmark; --scene requires --benchmark\n");
+    if ((int)benchmark + (int)transport + (int)live_demo > 1 || (scene >= 0 && !benchmark)) {
+        fprintf(stderr, "Choose one screen; --scene requires --benchmark\n");
         return 2;
     }
     lv_init();
@@ -113,6 +116,45 @@ int main(int argc, char **argv)
     } else {
         create_menu();
         if (transport) transport_screen_show(lv_screen_active());
+        if (live_demo) {
+            lv_obj_t *list = transport_screen_show_live();
+            departures_update_t update = {.status = DEPARTURES_DEMO};
+            update.departures.count = 12;
+            const char *directions[] = {"S+U Warschauer Str.", "Kniprodestr./Danziger Str.", "Example cancellation"};
+            int64_t now = (int64_t)time(NULL);
+            for (size_t i = 0; i < update.departures.count; ++i) {
+                departure_t *item = &update.departures.items[i];
+                snprintf(item->line, sizeof(item->line), "M10");
+                snprintf(item->direction, sizeof(item->direction), "%s", directions[i % 3]);
+                item->when = now + (int64_t)(i + 2) * 60;
+                item->station = (unsigned)(i % DEPARTURES_STATION_COUNT);
+                item->planned_only = i == 1;
+                item->cancelled = i == 2;
+            }
+            transport_screen_set_departures(&update);
+            if (smoke_test) {
+                lv_obj_update_layout(list);
+                if (lv_obj_get_scroll_bottom(list) <= 0) {
+                    fprintf(stderr, "Live departure list is not scrollable\n");
+                    lv_unlock();
+                    return 1;
+                }
+                lv_obj_scroll_to_y(list, 200, LV_ANIM_OFF);
+                if (lv_obj_get_scroll_y(list) <= 0) {
+                    fprintf(stderr, "Live departure list did not scroll\n");
+                    lv_unlock();
+                    return 1;
+                }
+                transport_screen_set_departures(&update);
+                if (lv_obj_get_scroll_y(list) <= 0) {
+                    fprintf(stderr, "Refresh unexpectedly reset the scroll position\n");
+                    lv_unlock();
+                    return 1;
+                }
+                lv_obj_scroll_to_y(list, 0, LV_ANIM_OFF);
+                puts("Live departure scrolling smoke test passed");
+            }
+        }
     }
     if (smoke_test) {
         lv_timer_t *timer = lv_timer_create(close_smoke_test, 2000, window);

@@ -3,6 +3,98 @@
 PlatformIO / ESP-IDF project for the **Elecrow CrowPanel Advance 5.0 V1.1**
 (PCB SKU **DIS02050A**, ESP32-S3-WROOM-1-N16R8).
 
+## Live departures prototype
+
+The optional `crowpanel_advance_5_v1_1_transport` environment starts the
+transport screen instead of the benchmark. It fetches departures for
+**Strassmannstr. (Berlin), station 900120515**, and
+**Landsberger Allee/Petersburger Str. (Berlin), station 900120016** from
+the BVG transport REST API. Both stations appear in a single chronological,
+touch-scrollable list; station tabs are not included yet. The default
+environment still starts the known-good benchmark.
+
+1. Copy the example file and edit it locally for a 2.4 GHz Wi-Fi network:
+
+   ```powershell
+   Copy-Item src/wifi_config.example.h src/wifi_config.h
+   # Edit src/wifi_config.h and enter your Wi-Fi SSID and password.
+   ```
+
+   `src/wifi_config.h` is gitignored. Credentials are compiled into the
+   firmware image, so keep that image private too; the application does not
+   write them to NVS. To change credentials, rebuild and reflash. A build
+   without this file creates an empty one; the resulting firmware displays a
+   configuration message rather than mock data. The values are C string
+   literals: escape quotation marks and backslashes in either value.
+
+2. Build, upload and monitor (replace `COM6` if needed):
+
+   ```powershell
+   pio run -e crowpanel_advance_5_v1_1_transport
+   pio run -e crowpanel_advance_5_v1_1_transport -t upload --upload-port COM6
+   pio device monitor --port COM6
+   ```
+
+The network task connects to Wi-Fi, synchronizes time using SNTP, verifies
+HTTPS using the ESP-IDF certificate bundle, and refreshes every 60 seconds
+after a successful fetch. Connection and fetch errors retry with backoff;
+initialization errors require a restart. The screen marks retained
+results as **STALE**, and `~` denotes a scheduled time used when the API did
+not provide `when`; cancelled departures are labelled. **API OK** means the
+last fetch for both stations succeeded, not that upstream predictions are
+necessarily fresh. **PARTIAL** indicates that at least one station failed;
+its retained rows are marked stale, or it has no rows if it has never loaded.
+Actual API availability, freshness, and limits are controlled by the upstream service. Long responses
+are capped at 32 KiB per station, and up to eight usable departures per
+station are displayed.
+Since the built-in LVGL fonts lack German characters, those characters are
+transliterated (for example, `ß` becomes `ss`).
+
+Network requests and JSON parsing run on a separate FreeRTOS task. Only the
+LVGL task updates widgets, using a one-element queue. Serial diagnostics
+continue to report display and internal-heap information. In particular,
+check the physical panel for shifting and watch available internal memory
+while Wi-Fi and TLS are active; desktop simulation cannot establish hardware
+stability. The transport build uses 8 KiB LVGL draw-worker stacks and
+32 KiB internal plus 256 KiB PSRAM LVGL pools. It puts mbedTLS allocations in
+PSRAM, prefers PSRAM for Wi-Fi/lwIP allocations, and limits static Wi-Fi
+receive buffers and the RX aggregation window to six to reduce internal
+DMA-memory pressure. This trades Wi-Fi throughput and potentially
+compatibility for memory; PSRAM traffic may also affect panel stability. TLS
+state in external RAM is not protected against physical memory access unless
+external RAM encryption is enabled. Before each HTTPS request, serial diagnostics
+report the lowest observed free stack among the drawing workers. Existing
+generated transport `sdkconfig` files
+override these defaults: set `CONFIG_LV_DRAW_THREAD_STACK_SIZE=8192`,
+`CONFIG_LV_MEM_SIZE_KILOBYTES=32`,
+`CONFIG_LV_MEM_POOL_EXPAND_SIZE_KILOBYTES=256`, disable
+`CONFIG_LV_USE_DEMO_WIDGETS`, select
+external SPIRAM as the mbedTLS memory allocation mode, enable
+`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, and set
+`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6` and `CONFIG_ESP_WIFI_RX_BA_WIN=6`
+when upgrading:
+
+```powershell
+pio run -e crowpanel_advance_5_v1_1_transport -t menuconfig
+```
+
+The transport build also disables GCC's IRA spill-slot sharing for the
+ESP-IDF LCD component to work around a Windows Xtensa compiler crash at `-Og`.
+
+Restore the benchmark using the default upload command below.
+
+The parser can also be tested on Windows using the cJSON bundled with the
+installed ESP-IDF package (adjust these paths for your installation):
+
+```powershell
+$env:PATH = 'C:\MSYS64\mingw64\bin;' + $env:PATH
+$json = 'E:\SDK\PlatformIO\packages\framework-espidf\components\json\cJSON'
+gcc -std=c11 -Wall -Wextra -Werror -DCJSON_NESTING_LIMIT=32 -Isrc "-I$json" `
+  tests/test_departures_parser.c src/departures_parser.c src/departures_merge.c "$json/cJSON.c" `
+  -o .pio/test_departures_parser.exe
+.\.pio\test_departures_parser.exe
+```
+
 ## Animation benchmark
 
 The firmware starts a continuously looping benchmark with eight 12-second scenes:
@@ -11,7 +103,7 @@ automatically scrolling list, followed by three static comparison scenes. Each
 eight-scene cycle alternates the LVGL display
 refresh and animation timer periods between 33 ms and 25 ms; the active period
 is shown on screen and logged. Animation durations and the 30 ms touch polling
-configuration are unchanged. It does not start the widgets demo or transport
+configuration are unchanged. The default firmware does not start the widgets demo or transport
 prototype. Leave the screen untouched when comparing runs. Each scene and its
 one-second FPS/CPU samples are also reported on the serial console.
 
@@ -89,9 +181,9 @@ with 32 KiB stacks, and adds a 48 KiB PSRAM pool to LVGL's 64 KiB internal
 pool. LVGL examples are disabled in the defaults; the separate widgets demo
 build setting remains available, although the firmware does not start it.
 Touch is initialized and polled when the GT911 is available, but no
-touch is needed for the benchmark. The transport prototype and old scroll
-benchmark scripts remain in the repository as historical code; their serial
-commands do not run on this firmware.
+touch is needed for the benchmark. The old scroll benchmark scripts remain
+in the repository as historical code; their serial commands do not run on
+this firmware.
 
 ## Build, upload, and monitor
 
@@ -134,10 +226,12 @@ ESP32 performance.
 ### Existing LVGL screens on Windows
 
 The native Windows port compiles **the same** `src/transport_screen.c` and
-`src/benchmark_screen.c` against LVGL 9.4.0. The transport screen still has
-its original fictional data and no station tabs. Run the executable with
-`--transport` or `--benchmark`; without an argument it opens a menu. The
-transport screen's **Widgets** button returns to that menu.
+`src/benchmark_screen.c` against LVGL 9.4.0. `--transport` shows the original
+fictional data; `--transport-live-demo` exercises the two-station scrollable
+live screen with simulated data, including a scheduled time and a cancellation. Neither desktop
+mode connects to the API. Use `--benchmark` for the benchmark; without an
+argument it opens a menu. The original transport screen's **Widgets** button
+returns to that menu.
 
 The following PowerShell example uses the local MSYS2 MinGW64 installation
 and Ninja. A recent MinGW-w64 or MSVC compiler, CMake, and a compatible build
@@ -153,6 +247,7 @@ cmake -S desktop/lvgl -B desktop/lvgl/build-win64 -G Ninja `
 cmake --build desktop/lvgl/build-win64 -j 8
 
 .\desktop\lvgl\build-win64\lvgl_pc.exe --transport
+.\desktop\lvgl\build-win64\lvgl_pc.exe --transport-live-demo
 .\desktop\lvgl\build-win64\lvgl_pc.exe --benchmark
 # Optional: choose the first benchmark scene (0–7):
 .\desktop\lvgl\build-win64\lvgl_pc.exe --benchmark --scene 5
@@ -168,14 +263,6 @@ The PC version does not estimate ESP32 CPU usage. Its console also shows the
 number of static-scene redraw timer callbacks in the sampling interval. The
 initial window paint can appear in the first idle sample. For a short launch
 check add `--smoke-test`.
-
-### MicroPython + LVGL prototype
-
-A separate experimental **MicroPython + LVGL** version, with two station tabs,
-simulated departures and benchmark scenes, is in
-[`firmware/micropython/README.md`](firmware/micropython/README.md). It requires
-a custom MicroPython image and has not yet been tested on the device.
-The Windows LVGL simulator above runs the native C UI, not this Python app.
 
 ## ESP32 scheduler tick A/B test
 
@@ -312,4 +399,4 @@ connection by asking it to use the build123d MCP tools to create and render a
   The pixel clock range follows the [ST7262 datasheet](https://www.orientdisplay.com/wp-content/uploads/2020/11/ST7262.pdf).
   Confirm signal stability on the actual board when changing timing or clock
   settings.
-- Do not commit Wi-Fi credentials; they are not needed for this hardware test.
+- Do not commit Wi-Fi credentials or share firmware built with them.

@@ -14,3 +14,5 @@ __pycache__/
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 desktop/lvgl/build-*/
+src/wifi_config.h
+sdkconfig.crowpanel_advance_5_v1_1_transport
