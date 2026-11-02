@@ -1,9 +1,7 @@
 .pio/
 sdkconfig
 sdkconfig.old
-sdkconfig.crowpanel_advance_5_v1_1
-sdkconfig.crowpanel_advance_5_v1_1_o3
-sdkconfig.crowpanel_advance_5_v1_1_tick1000
+sdkconfig.crowpanel_*
 managed_components/
 build/
 *.bin
@@ -15,4 +13,3 @@ __pycache__/
 .vscode/launch.json
 desktop/lvgl/build-*/
 src/wifi_config.h
-sdkconfig.crowpanel_advance_5_v1_1_transport

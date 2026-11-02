@@ -5,19 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define DEPARTURES_STATION_COUNT 2
-#define DEPARTURES_PER_STATION_MAX 8
+#define DEPARTURES_STATION_COUNT 4
+#define DEPARTURES_PER_STATION_MAX 32
 #define DEPARTURES_MAX (DEPARTURES_STATION_COUNT * DEPARTURES_PER_STATION_MAX)
-
-static inline const char *departures_station_id(unsigned station)
-{
-    return station == 0 ? "900120515" : "900120016";
-}
-
-static inline const char *departures_station_name(unsigned station)
-{
-    return station == 0 ? "Strassmannstr." : "Landsberger Allee/Petersburger Str.";
-}
 
 typedef struct {
     char line[16];
@@ -52,6 +42,9 @@ typedef enum {
 typedef struct {
     departures_t departures;
     departures_status_t status;
+    int64_t last_updated; /* Unix time of the most recent successful station fetch. */
+    bool station_valid[DEPARTURES_STATION_COUNT];
+    bool station_stale[DEPARTURES_STATION_COUNT];
 } departures_update_t;
 
 #endif

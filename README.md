@@ -1,402 +1,141 @@
 # Berlin Public Transport Display
 
-PlatformIO / ESP-IDF project for the **Elecrow CrowPanel Advance 5.0 V1.1**
-(PCB SKU **DIS02050A**, ESP32-S3-WROOM-1-N16R8).
+ESP-IDF / PlatformIO firmware for the Elecrow CrowPanel Advance 5.0 V1.1
+(ESP32-S3, 800 × 480). The app shows chronologically ordered BVG departures,
+with one touch-selectable tab per station and up to 32 departures per station.
+It uses LVGL 9.4 and the community `v6.bvg.transport.rest` API.
 
-## Live departures prototype
+## Prerequisites
 
-The optional `crowpanel_advance_5_v1_1_transport` environment starts the
-transport screen instead of the benchmark. It fetches departures for
-**Strassmannstr. (Berlin), station 900120515**, and
-**Landsberger Allee/Petersburger Str. (Berlin), station 900120016** from
-the BVG transport REST API. Both stations appear in a single chronological,
-touch-scrollable list; station tabs are not included yet. The default
-environment still starts the known-good benchmark.
+- Python 3.10 or newer, PlatformIO Core (`pio`), CMake, Git, and a C/C++ toolchain.
+- Windows simulator: MSYS2 MinGW-w64 GCC and Ninja (the scripts look for
+  `C:\msys64\mingw64\bin`).
+- macOS simulator: Xcode command-line tools and SDL2 (`brew install sdl2 cmake`).
+- First builds may download PlatformIO packages or LVGL.
 
-1. Copy the example file and edit it locally for a 2.4 GHz Wi-Fi network:
-
-   ```powershell
-   Copy-Item src/wifi_config.example.h src/wifi_config.h
-   # Edit src/wifi_config.h and enter your Wi-Fi SSID and password.
-   ```
-
-   `src/wifi_config.h` is gitignored. Credentials are compiled into the
-   firmware image, so keep that image private too; the application does not
-   write them to NVS. To change credentials, rebuild and reflash. A build
-   without this file creates an empty one; the resulting firmware displays a
-   configuration message rather than mock data. The values are C string
-   literals: escape quotation marks and backslashes in either value.
-
-2. Build, upload and monitor (replace `COM6` if needed):
-
-   ```powershell
-   pio run -e crowpanel_advance_5_v1_1_transport
-   pio run -e crowpanel_advance_5_v1_1_transport -t upload --upload-port COM6
-   pio device monitor --port COM6
-   ```
-
-The network task connects to Wi-Fi, synchronizes time using SNTP, verifies
-HTTPS using the ESP-IDF certificate bundle, and refreshes every 60 seconds
-after a successful fetch. Connection and fetch errors retry with backoff;
-initialization errors require a restart. The screen marks retained
-results as **STALE**, and `~` denotes a scheduled time used when the API did
-not provide `when`; cancelled departures are labelled. **API OK** means the
-last fetch for both stations succeeded, not that upstream predictions are
-necessarily fresh. **PARTIAL** indicates that at least one station failed;
-its retained rows are marked stale, or it has no rows if it has never loaded.
-Actual API availability, freshness, and limits are controlled by the upstream service. Long responses
-are capped at 32 KiB per station, and up to eight usable departures per
-station are displayed.
-Since the built-in LVGL fonts lack German characters, those characters are
-transliterated (for example, `ß` becomes `ss`).
-
-Network requests and JSON parsing run on a separate FreeRTOS task. Only the
-LVGL task updates widgets, using a one-element queue. Serial diagnostics
-continue to report display and internal-heap information. In particular,
-check the physical panel for shifting and watch available internal memory
-while Wi-Fi and TLS are active; desktop simulation cannot establish hardware
-stability. The transport build uses 8 KiB LVGL draw-worker stacks and
-32 KiB internal plus 256 KiB PSRAM LVGL pools. It puts mbedTLS allocations in
-PSRAM, prefers PSRAM for Wi-Fi/lwIP allocations, and limits static Wi-Fi
-receive buffers and the RX aggregation window to six to reduce internal
-DMA-memory pressure. This trades Wi-Fi throughput and potentially
-compatibility for memory; PSRAM traffic may also affect panel stability. TLS
-state in external RAM is not protected against physical memory access unless
-external RAM encryption is enabled. Before each HTTPS request, serial diagnostics
-report the lowest observed free stack among the drawing workers. Existing
-generated transport `sdkconfig` files
-override these defaults: set `CONFIG_LV_DRAW_THREAD_STACK_SIZE=8192`,
-`CONFIG_LV_MEM_SIZE_KILOBYTES=32`,
-`CONFIG_LV_MEM_POOL_EXPAND_SIZE_KILOBYTES=256`, disable
-`CONFIG_LV_USE_DEMO_WIDGETS`, select
-external SPIRAM as the mbedTLS memory allocation mode, enable
-`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, and set
-`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6` and `CONFIG_ESP_WIFI_RX_BA_WIN=6`
-when upgrading:
-
-```powershell
-pio run -e crowpanel_advance_5_v1_1_transport -t menuconfig
-```
-
-The transport build also disables GCC's IRA spill-slot sharing for the
-ESP-IDF LCD component to work around a Windows Xtensa compiler crash at `-Og`.
-
-Restore the benchmark using the default upload command below.
-
-The parser can also be tested on Windows using the cJSON bundled with the
-installed ESP-IDF package (adjust these paths for your installation):
-
-```powershell
-$env:PATH = 'C:\MSYS64\mingw64\bin;' + $env:PATH
-$json = 'E:\SDK\PlatformIO\packages\framework-espidf\components\json\cJSON'
-gcc -std=c11 -Wall -Wextra -Werror -DCJSON_NESTING_LIMIT=32 -Isrc "-I$json" `
-  tests/test_departures_parser.c src/departures_parser.c src/departures_merge.c "$json/cJSON.c" `
-  -o .pio/test_departures_parser.exe
-.\.pio\test_departures_parser.exe
-```
-
-## Animation benchmark
-
-The firmware starts a continuously looping benchmark with eight 12-second scenes:
-a speedometer, moving blocks, animated arcs, translucent layers, and an
-automatically scrolling list, followed by three static comparison scenes. Each
-eight-scene cycle alternates the LVGL display
-refresh and animation timer periods between 33 ms and 25 ms; the active period
-is shown on screen and logged. Animation durations and the 30 ms touch polling
-configuration are unchanged. The default firmware does not start the widgets demo or transport
-prototype. Leave the screen untouched when comparing runs. Each scene and its
-one-second FPS/CPU samples are also reported on the serial console.
-
-To compare refresh periods with the same firmware, use the 1000 Hz build below
-and capture at least two full cycles (about three minutes and 15 seconds),
-preferably more.
-Compare the same scenes and discard samples near scene or period changes:
-their one-second measurement windows may include the previous scene or period.
-The 25 ms setting is a timer period, not a promise of 40 FPS; panel scanout
-and rendering remain independent limits. Confirm both modes are visually stable.
-
-The three static comparison scenes use the same basic layout:
-
-- **Static idle:** no periodic changes or redraws after the initial scene draw.
-- **Static 1 pixel:** a 1×1 object changes color at the selected timer period.
-- **Static full redraw:** the entire screen is invalidated at the same timer
-  period, forcing a redraw of the static content without changing its appearance.
-
-These tests keep the on-screen metrics label fixed, so it does not add dirty
-regions. Live FPS and CPU estimates are available on the serial console. The
-five-second diagnostics report the average and largest LVGL redraw regions;
-use windows wholly within a scene to check that they are approximately 1 and
-384,000 pixels, respectively. Transition windows can include the previous scene.
-The redraw timer and display refresh timer are separate, so updates may be
-coalesced or delayed; the selected period is not a guaranteed FPS.
-
-After the idle transition, presented FPS should approach zero because nothing
-is being presented, even though the panel continues scanning at approximately
-39 Hz. This idle test does not measure maximum rendering throughput. All three
-tests still use the same two full-screen framebuffers and synchronized switching;
-the one-pixel test is a partial LVGL redraw, not a change to panel scanout.
-Avoid touching the screen during the test. Per-core idle-counter CPU estimates
-can be especially noisy if an idle task is not switched out during a sample.
-
-The display uses two full-screen RGB565 framebuffers in PSRAM and the RGB
-driver's 20-line internal-RAM bounce buffers. LVGL renders into the inactive
-framebuffer. After the last dirty area, a task on the LCD interrupt core switches
-framebuffers and waits for bounce-frame completion before LVGL reuses the old
-buffer. This synchronization is unchanged from the previous test firmware.
-
-The overlay reports:
-
-- **FPS:** completed framebuffer switches per second over the last actual
-  sampling interval, not the panel's scan rate. Updating the overlay itself
-  causes a small amount of drawing and can contribute to the count.
-- **CPU:** approximate average busy percentage across both cores, calculated
-  from the change in each FreeRTOS idle task's runtime. This is not the LVGL
-  task's CPU usage alone. Interrupt time can be attributed to the interrupted
-  task, and sampling and runtime-statistics overhead affect the estimate.
-
-The serial monitor additionally reports refresh timing, redraw area, scanout
-counters, and internal heap every five seconds. These measurements do not
-prove the display is flicker-free; check the physical screen too. Scene changes
-and the on-screen metrics update can be included in an adjacent sample.
-
-The per-scene serial samples include estimated busy percentages for each
-core as well as their average. The five-second diagnostics also report:
-
-- **Present interval:** time between completed framebuffer switches.
-- **Between presented refreshes:** time from the end of one LVGL refresh that
-  presented a frame to the start of the next such refresh. This includes task
-  delays, other LVGL work, diagnostics, and any refreshes without a presentation;
-  it is not exclusively scheduler time.
-- **LVGL task delay:** requested delay after conversion to FreeRTOS ticks, and
-  the actual elapsed time until the task resumes. Tick phase and other tasks can
-  affect the observed delay.
-
-These are wall-clock measurements, not CPU execution times. Interval and gap
-samples can cross reporting windows or scene boundaries. Idle-task counters are
-updated on context switches, so short per-core samples can be noisy; interrupt
-attribution also affects them.
-
-The default build compiles LVGL at `-O2`, uses two FreeRTOS drawing workers
-with 32 KiB stacks, and adds a 48 KiB PSRAM pool to LVGL's 64 KiB internal
-pool. LVGL examples are disabled in the defaults; the separate widgets demo
-build setting remains available, although the firmware does not start it.
-Touch is initialized and polled when the GT911 is available, but no
-touch is needed for the benchmark. The old scroll benchmark scripts remain
-in the repository as historical code; their serial commands do not run on
-this firmware.
-
-## Build, upload, and monitor
-
-From this directory:
-
-```powershell
-pio run
-pio run -t upload --upload-port COM6
-pio device monitor --port COM6
-```
-
-Replace `COM6` with the board's port if necessary. The benchmark starts
-automatically and cycles through its scenes indefinitely. Close the serial
-monitor before uploading. To test the metric calculations on a host with GCC:
-
-```powershell
-gcc -std=c11 -Wall -Wextra -Werror -Isrc tests/test_benchmark_metrics.c src/benchmark_metrics.c -o .pio/benchmark_metrics_test.exe
-.\.pio\benchmark_metrics_test.exe
-```
-
-A fresh ESP-IDF configuration enables FreeRTOS runtime statistics using the
-ESP timer in `sdkconfig.defaults`. Existing generated `sdkconfig` files take
-precedence over defaults. If upgrading an existing checkout, use
-`pio run -t menuconfig` to enable `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS`,
-select the ESP timer as the runtime statistics clock, and use the 32-bit
-counter type. Repeat for the `-O3` environment if using it. The build fails
-explicitly if the required statistics are disabled.
-Existing configurations may also retain `CONFIG_LV_BUILD_EXAMPLES=y`; disable
-it in each environment's menuconfig to stop building the examples.
-
-## Windows development simulator
-
-The desktop application is separate from the ESP32 firmware and does not
-require flashing. Its window coordinates are 800 × 480 logical pixels;
-Windows DPI scaling can change the physical window size. Mouse clicks and
-drags replace touchscreen input. The simulator does not reproduce the CrowPanel
-RGB bus, PSRAM bandwidth, scanout synchronization, touch controller, or
-ESP32 performance.
-
-### Existing LVGL screens on Windows
-
-The native Windows port compiles **the same** `src/transport_screen.c` and
-`src/benchmark_screen.c` against LVGL 9.4.0. `--transport` shows the original
-fictional data; `--transport-live-demo` exercises the two-station scrollable
-live screen with simulated data, including a scheduled time and a cancellation. Neither desktop
-mode connects to the API. Use `--benchmark` for the benchmark; without an
-argument it opens a menu. The original transport screen's **Widgets** button
-returns to that menu.
-
-The following PowerShell example uses the local MSYS2 MinGW64 installation
-and Ninja. A recent MinGW-w64 or MSVC compiler, CMake, and a compatible build
-tool are required; an old Strawberry Perl GCC is not sufficient for LVGL's
-Windows APIs. If needed, adapt the tool paths:
-
-```powershell
-$env:PATH = 'C:\MSYS64\mingw64\bin;' + $env:PATH
-cmake -S desktop/lvgl -B desktop/lvgl/build-win64 -G Ninja `
-  -DCMAKE_BUILD_TYPE=Release `
-  -DCMAKE_C_COMPILER=C:/MSYS64/mingw64/bin/gcc.exe `
-  -DCMAKE_CXX_COMPILER=C:/MSYS64/mingw64/bin/g++.exe
-cmake --build desktop/lvgl/build-win64 -j 8
-
-.\desktop\lvgl\build-win64\lvgl_pc.exe --transport
-.\desktop\lvgl\build-win64\lvgl_pc.exe --transport-live-demo
-.\desktop\lvgl\build-win64\lvgl_pc.exe --benchmark
-# Optional: choose the first benchmark scene (0–7):
-.\desktop\lvgl\build-win64\lvgl_pc.exe --benchmark --scene 5
-```
-
-The build uses `managed_components/lvgl__lvgl` from the PlatformIO build if
-available and checks its version. Otherwise CMake downloads the `v9.4.0` tag
-from the LVGL repository, so the first configure needs network access. The
-Windows backend has its own framebuffer and threading configuration; it is not
-the ESP-IDF display driver. Benchmark output counts PC LVGL refreshes that
-flush at least one area, **not** ESP32 framebuffer switches or screen FPS.
-The PC version does not estimate ESP32 CPU usage. Its console also shows the
-number of static-scene redraw timer callbacks in the sampling interval. The
-initial window paint can appear in the first idle sample. For a short launch
-check add `--smoke-test`.
-
-## ESP32 scheduler tick A/B test
-
-The default `crowpanel_advance_5_v1_1` environment uses a 100 Hz FreeRTOS
-tick; `crowpanel_advance_5_v1_1_tick1000` uses 1000 Hz. Both use the same
-alternating LVGL timer periods and synchronized framebuffer-switching code. A higher tick
-rate can add overhead; it is not assumed to improve performance or visual
-stability.
-
-Flash each build in turn, closing the monitor before each upload:
-
-```powershell
-pio run -e crowpanel_advance_5_v1_1 -t upload --upload-port COM6
-pio device monitor --port COM6
-# Close the monitor, then:
-pio run -e crowpanel_advance_5_v1_1_tick1000 -t upload --upload-port COM6
-pio device monitor --port COM6
-```
-
-For each run, leave the display untouched and capture at least two complete
-eight-scene cycles (about three minutes and 15 seconds). Confirm the startup `Timing` line reports
-the intended tick rate and note any flickering or instability. Compare the
-same scene and period's FPS, per-core CPU, refresh timings and cadence, preferably
-over multiple cycles rather than at scene transitions. Replace `COM6` if needed.
-To restore the baseline, flash the first environment again.
-
-Each environment has its own generated `sdkconfig`; existing files take
-precedence over defaults. The 1000 Hz build fails if its generated config does
-not actually specify 1000 Hz. For a controlled comparison, keep other settings
-the same between the two configs.
-
-The optional `crowpanel_advance_5_v1_1_o3` environment builds LVGL at `-O3`
-with 16 KiB worker stacks for a fresh configuration. Existing `-O3`
-configurations using 32 KiB stacks must be changed to 16 KiB in menuconfig;
-the larger `-O3` IRAM image can otherwise prevent a worker from starting.
-This build remains experimental; earlier transport-screen tests found no
-meaningful improvement over `-O2`.
-## VS Code note
-
-PlatformIO builds this ESP-IDF project using CMake internally. The root
-`CMakeLists.txt` is required by that build, but the separate CMake Tools
-extension may also try to configure it and ask you to select a compiler kit.
-That extra kit is not needed when building through PlatformIO.
-
-The workspace disables CMake Tools' automatic configure-on-open and
-configure-on-edit behavior in `.vscode/settings.json`. Use the PlatformIO
-**Build** command for builds. PlatformIO also generates
-`.vscode/c_cpp_properties.json` for IntelliSense; avoid editing that generated
-file directly.
-
-## CAD design setup
-
-For CAD work with build123d in VS Code:
-
-1. Create a Python virtual environment for OCP with `uv venv --python 3.14.6`.
-2. Install the `ocp_vscode` library from the VS Code Command Palette.
-3. Install pip in the environment with `uv run python -m ensurepip`, then
-   install build123d from its GitHub repository:
-
-   ```sh
-   python3 -m pip install git+https://github.com/gumyr/build123d
-   ```
-
-### build123d MCP server for Codex
-
-The MCP server runs as a local process that Codex starts when needed. It has
-its own uv-managed environment, separate from the project's `.venv`. Verify it
-can start, then register it in Codex's user configuration:
+Run these commands from the project directory on either OS:
 
 ```sh
-uv tool run --python 3.14.6 build123d-mcp@latest --version
-codex mcp add build123d -- uv tool run --python 3.14.6 build123d-mcp@latest
-codex mcp list
+python scripts/app.py build
+python scripts/app.py run                 # desktop simulator, mock data only
+python scripts/app.py run --smoke-test
+python scripts/app.py deploy --port COM6  # on macOS, use /dev/cu.usbmodem…
+python scripts/app.py monitor --port COM6
+python scripts/app.py deploy-monitor --port COM6
 ```
 
-Codex CLI and the Codex VS Code extension share this MCP configuration. Reload
-or restart VS Code after adding the server so the extension picks it up. If
-Codex cannot find `uv`, use its absolute executable path in the `codex mcp add`
-command (find it with `command -v uv`). In a new Codex session, verify the
-connection by asking it to use the build123d MCP tools to create and render a
-20 mm cube, then report its dimensions.
+The port argument may be omitted for PlatformIO auto-detection. Exit the
+serial monitor before deploying. On Windows use `py` if `python` is unavailable.
+The simulator's Wi-Fi, search, and settings are mocked and do not persist.
 
-## Hardware notes
+## Encrypted settings: one-time provisioning
 
-- Display: 5-inch, 800×480 IPS panel with an ST7262 driver, connected over a
-  16-bit RGB565 bus. The RGB signals are wired to the ESP32-S3 as follows:
-  PCLK GPIO 39, HSYNC GPIO 40, VSYNC GPIO 41, DE GPIO 42; B0–B4 GPIOs
-  21/47/48/45/38, G0–G5 GPIOs 9/10/11/12/13/14, and R0–R4 GPIOs
-  7/17/18/3/46.
-- Touch and backlight share I²C: SDA GPIO 15 and SCL GPIO 16. Touch is a
-  capacitive, single-touch GT911 at address `0x5D`. On V1.1, backlight control
-  is handled by the STC8H1K28 at address `0x30`.
-- The configured pixel clock is 16 MHz, matching Elecrow's V1.1 ESP-IDF RGB
-  example, including its active-negative PCLK setting. With the current porches,
-  the raster rate is `16,000,000 / ((800 + 4 + 8 + 8) × (480 + 4 + 8 + 8))`,
-  or about 39.0 frames per second. This
-  is the panel scan rate; LVGL can render fewer frames if widget drawing becomes
-  the limit. The ST7262 datasheet's generic RGB timing table lists 23–27 MHz,
-  while Elecrow's board-specific V1.1 ESP-IDF example configures 16 MHz.
-- The RGB panel uses two 750 KiB framebuffers in PSRAM and two 20-line ESP-IDF
-  bounce buffers in internal RAM. LVGL renders dirty areas into the inactive
-  framebuffer; the RGB driver copies the displayed framebuffer into bounce
-  buffers for DMA scanout. At 39.0 fps, active 16-bit pixels amount to about
-  30 MB/s of framebuffer reads. The ESP-IDF driver is configured to restart
-  scanout automatically when it detects a missed bounce-buffer completion,
-  rather than unconditionally restarting at every VSYNC. A delayed restart can
-  itself cause a transient shift.
-- The CPU runs at 240 MHz and the data cache uses 64-byte lines, matching
-  Elecrow's V1.1 example. Espressif recommends 64-byte cache lines and larger
-  bounce buffers in this mode to reduce RGB scanout drift. Every five seconds,
-  serial diagnostics report VSYNC events, completed bounce frames, and LVGL
-  updates. For intervals with updates, they also report average per-update
-  preparation (including layout and synchronization of dirty areas between
-  buffers), drawing/other work, framebuffer-switch wait, and total refresh
-  time, plus the maximum refresh time. The draw/other figure includes refresh
-  bookkeeping and excludes the measured switch wait; it is not a pure CPU
-  drawing benchmark. Diagnostics also report free internal heap and the
-  largest available internal block, to help assess the RAM cost of IRAM code
-  and bounce buffers. These counters can help identify bottlenecks or missed
-  frame completions but do not prove the image is free of visual artifacts.
-- Area diagnostics sum the clipped regions passed to LVGL's flush callback
-  and report their average size/count per update and the largest rectangle
-  during the interval. This is a coarse measure of redraw work, not a
-  per-widget time profile; overlapping regions can be counted more than once.
-- The double-buffer approach follows the V1.1
-  [Elecrow LVGL reference](https://github.com/Elecrow-RD/CrowPanel-Advance-5-HMI-ESP32-S3-AI-Powered-IPS-Touch-Screen-800x480/tree/master/example/V1.1/ESP_IDF/Lesson03-LVGL_Control_LED)
-  and Espressif's
-  [LVGL RGB display port](https://github.com/espressif/esp-bsp/blob/bba9438/components/esp_lvgl_port/src/lvgl9/esp_lvgl_port_disp.c).
-  Tearing during updates, RGB data starvation, panel timing, and backlight
-  behavior are distinct possible causes of apparent flicker; verify changes
-  on the physical display rather than assuming they have the same cause.
-- The GPIO map and V1.1 I²C controller details follow [Elecrow's board
-  documentation](https://elecrow.com/wiki/CrowPanel_Advance_5.0-HMI_ESP32_AI_Display.html).
-  The pixel clock range follows the [ST7262 datasheet](https://www.orientdisplay.com/wp-content/uploads/2020/11/ST7262.pdf).
-  Confirm signal stability on the actual board when changing timing or clock
-  settings.
-- Do not commit Wi-Fi credentials or share firmware built with them.
+The board has 16 MiB flash. The partition table preserves the default NVS and
+SPIFFS locations and reserves 64 KiB at `0xF00000` for encrypted app settings.
+The factory app partition is reduced by 64 KiB. Before deploying a new partition
+table, back up any important flash contents. The application and scripts do not
+explicitly erase the settings partition or automatically provision keys.
+ESP-IDF NVS can modify flash during initialization, recovery, and normal writes,
+including erasing individual pages.
+
+**Provisioning irreversibly burns ESP32-S3 eFuse BLOCK_KEY0.** Confirm the
+correct device and an unused block before continuing; an interrupted burn may
+consume the block permanently. The script displays the eFuse summary, requires
+`BURN KEY0`, and leaves `espefuse`'s own confirmation enabled. It refuses to
+force a used block. Install the pinned provisioning dependencies in the same
+Python environment as the script. In particular, `esptool` 4.11.0 cannot use
+`bitstring` 5.0.0:
+
+```sh
+python -m pip install -r scripts/requirements-provision.txt
+python scripts/provision.py --port COM6
+```
+
+The script generates a random key in a temporary host file, passes it to
+Espressif's `espefuse` with `HMAC_UP` purpose and default read protection, and
+deletes the file afterward. Host storage may retain recoverable remnants; use
+a trusted machine and temporary directory. Never commit or share key material.
+Build and deploy the app afterward. An unprovisioned or unusable key leaves
+settings read-only and displays an error; there is no unencrypted fallback.
+
+The app uses ESP-IDF encrypted NVS with keys derived from the HMAC peripheral.
+The default NVS partition remains unencrypted and Wi-Fi uses RAM-only driver
+storage; app credentials are stored only in the encrypted settings partition.
+The firmware uses mbedTLS software AES for NVS and TLS to avoid hardware AES
+DMA allocation failures under display and Wi-Fi memory pressure. AES-XTS remains
+enabled for app settings, but TLS performance may differ. PlatformIO updates
+the AES option in an existing generated `sdkconfig` on build; other settings
+are preserved.
+Secure boot and full flash encryption are **not** enabled: someone with
+physical access who can replace firmware may be able to access stored secrets.
+Old firmware images with previously compiled credentials remain sensitive.
+
+### Settings storage troubleshooting
+
+Provision KEY0 only once. If `espefuse` reports that BLOCK_KEY0 is
+read-protected, do not force a write or attempt to burn it again. Protection
+alone does not verify that the key has the required HMAC purpose.
+
+`ESP_ERR_NVS_INVALID_STATE` indicates an NVS state problem; it does not by
+itself identify a key problem or the original cause. Capture the complete boot
+log and the **first** failed save, including earlier errors, using
+`python scripts/app.py monitor --port COM6`. Redact credentials before sharing
+logs. The firmware logs the operation that failed and disables further settings
+writes for that session. A failed save may leave the on-flash state uncertain.
+Do not erase the partition or reprovision to troubleshoot without first
+considering a backup and the consequences; NVS can also perform recovery writes
+when initialized after a reboot.
+If the log instead shows `esp-aes: Failed to allocate memory` followed by
+`ESP_ERR_NVS_XTS_ENCR_FAILED`, rebuild with the software AES configuration.
+This firmware change does not provision the key or explicitly erase the
+settings partition.
+
+### Wi-Fi initialization troubleshooting
+
+The firmware keeps LVGL's primary and extra memory pools in PSRAM to leave
+internal RAM available for the network and DMA. If Wi-Fi initialization still
+fails, the serial log identifies the failing step and reports internal and
+DMA-capable heap availability. Capture the complete boot log for diagnosis;
+the desktop simulator cannot reproduce hardware memory pressure.
+
+## On the panel
+
+Open **Settings** and use the **Wi-Fi** tab to scan for a 2.4 GHz network or
+enter an SSID manually, enter the password, and save. Tap a text field to open
+the on-screen keyboard; use its confirm key to dismiss it. On the **Stations**
+tab, search for stations after Wi-Fi connects,
+select a result, and add it. Select saved stations to remove or reorder them;
+up to four are supported. The two original Berlin stations are the defaults.
+Settings are saved immediately. Tabs show `~` for scheduled-only times and
+label cancelled departures. Errors preserve the last results as stale and retry.
+The header shows the time of the most recent successful station update in Berlin
+local time; a partial update may still leave some stations stale.
+API availability, response sizes, and freshness are controlled upstream.
+
+## UI development
+
+The 800 × 480 layout and its callbacks are written directly in
+`src/ui/transport_screen.c`, shared by the firmware and desktop simulator.
+UI changes require rebuilding and flashing the firmware; no editor or export
+step is needed. Validate display stability on the physical panel.
+The built-in LVGL font lacks German umlauts, so station and destination names
+containing them may show placeholders. A font with extended Latin glyphs is
+needed to display those names correctly.
+
+Other source directories separate departure fetching and parsing (`departures/`),
+settings and persistence (`settings/`), and hardware-specific LVGL memory support
+(`platform/`). The panel entry point remains in `src/main.c`.
+
+## Tests
+
+```sh
+python scripts/test.py --cjson-dir /path/to/esp-idf/components/json/cJSON
+python -m unittest discover -s tests -p test_pio_sdkconfig.py
+python scripts/app.py run --smoke-test
+```
+
+The C tests cover departure parsing and ordering, settings validation, the
+PSRAM pool allocator, and the mock service. The simulator does not reproduce
+panel scanout, touch hardware, PSRAM pressure, encrypted flash, or network/TLS behavior. On real hardware,
+verify provisioning, power-cycle persistence, Wi-Fi and station setup, stale
+and error behavior, display stability, and internal heap margins.

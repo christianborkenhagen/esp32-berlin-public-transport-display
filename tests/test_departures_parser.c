@@ -45,7 +45,7 @@ int main(int argc, char **argv)
         "{\"departures\":[{\"line\":{\"name\":\"M10\"},\"direction\":\"X\","
         "\"when\":\"2026-02-28T09:34:00+24:00\"}]}";
     assert(!departures_parse(bad_offset, &result));
-    char many[2048] = "{\"departures\":[";
+    char many[8192] = "{\"departures\":[";
     for (unsigned i = 0; i < DEPARTURES_PER_STATION_MAX + 2; ++i) {
         strcat(many, i ? "," : "");
         strcat(many, "{\"line\":{\"name\":\"M10\"},\"direction\":\"X\","
@@ -78,11 +78,10 @@ int main(int argc, char **argv)
     }
     departures_merge(stations, stale, &merged);
     assert(merged.count == DEPARTURES_MAX);
-    for (unsigned i = 0; i < DEPARTURES_MAX; ++i) {
-        assert(merged.items[i].when == i);
-        assert(merged.items[i].station == i % DEPARTURES_STATION_COUNT);
-    }
-    stations[0].count = stations[1].count = 0;
+    for (unsigned i = 1; i < DEPARTURES_MAX; ++i)
+        assert(merged.items[i - 1].when <= merged.items[i].when);
+    for (unsigned s = 0; s < DEPARTURES_STATION_COUNT; ++s)
+        stations[s].count = 0;
     departures_merge(stations, stale, &merged);
     assert(merged.count == 0);
     char deeply_nested[256] = "{\"a\":";

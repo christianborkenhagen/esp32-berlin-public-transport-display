@@ -11,8 +11,20 @@ CONFIG_LV_USE_DEMO_WIDGETS=n
 # This moves mbedTLS dynamic allocations to external PSRAM.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 
+# ESP-IDF's hardware AES path allocates DMA memory for each operation.
+# With the display and Wi-Fi running, those allocations can fail during NVS
+# encryption. Software AES keeps the same AES-XTS on-flash format.
+CONFIG_MBEDTLS_HARDWARE_AES=n
+
 # Prefer external RAM for Wi-Fi/lwIP allocations where supported. Keep the
 # internal static receive buffers and matching aggregation window small.
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6
 CONFIG_ESP_WIFI_RX_BA_WIN=6
+
+# C layouts use widget names to bind controllers and simulator tests.
+CONFIG_LV_USE_XML=n
+CONFIG_LV_USE_OBJ_NAME=y
+# LVGL 9.4's span widget needs observer types even when XML is disabled.
+CONFIG_LV_USE_OBSERVER=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y

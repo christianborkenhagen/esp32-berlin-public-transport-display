@@ -16,19 +16,15 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "lvgl.h"
-#include "benchmark_screen.h"
-#ifdef APP_TRANSPORT
 #include "departures_service.h"
 #include "transport_screen.h"
-#endif
+#include "app_settings.h"
+#include "lvgl_psram_pool.h"
 
 #if !CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0 && !CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1
 #error "The main task must be pinned so the LCD interrupts and switch task share a core"
 #endif
 
-#if defined(APP_LVGL_O3) && CONFIG_LV_DRAW_THREAD_STACK_SIZE >= 32768
-#error "The -O3 build needs smaller LVGL worker stacks; see README.md"
-#endif
 
 #define LCD_H_RES               800
 #define LCD_V_RES               480
@@ -57,11 +53,7 @@
 #define LVGL_TASK_STACK_SIZE    12288
 #define LVGL_TASK_PRIORITY      5
 #define LVGL_TASK_CORE          1
-#ifdef APP_TRANSPORT
 #define LVGL_EXTRA_POOL_SIZE    (256 * 1024)
-#else
-#define LVGL_EXTRA_POOL_SIZE    (48 * 1024)
-#endif
 #define LCD_SWITCH_TASK_STACK_SIZE 3072
 #define LCD_SWITCH_TASK_PRIORITY 6
 
@@ -468,20 +460,18 @@ static void lvgl_display_event_cb(lv_event_t *event)
     }
 }
 
-#ifndef APP_TRANSPORT
-static uint32_t benchmark_present_count(void)
-{
-    /* Both the flush callback and benchmark timer run on the LVGL task. */
-    return s_lvgl_frame_count;
-}
-#endif
 
 static void lvgl_task(void *arg)
 {
     (void)arg;
 
+    if (!app_lvgl_reserve_pool(LV_MEM_SIZE)) {
+        ESP_LOGE(TAG, "Could not reserve LVGL primary PSRAM pool");
+        vTaskDelete(NULL);
+        return;
+    }
     lv_init();
-#ifdef APP_TRANSPORT
+    ESP_LOGI(TAG, "LVGL primary pool: %u bytes in PSRAM", (unsigned)LV_MEM_SIZE);
     /* LVGL does not propagate a failed draw-worker task creation. */
     enum { TASK_SNAPSHOT_CAPACITY = 48 };
     TaskStatus_t *tasks = heap_caps_malloc(
@@ -506,20 +496,17 @@ static void lvgl_task(void *arg)
     ESP_LOGI(TAG, "Internal heap after LVGL init: free %u, largest %u",
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-#endif
     lv_tick_set_cb(lvgl_tick_get_ms);
 
     /*
      * The two drawing workers can need more temporary layer memory than
-     * LVGL's internal pool provides, especially when changing tabs. Add a
+     * LVGL's primary pool provides, especially when changing tabs. Add a
      * separate PSRAM pool before any display objects or draw jobs exist.
      * LVGL owns the allocation for the lifetime of the application.
      */
     void *extra_pool = heap_caps_malloc(LVGL_EXTRA_POOL_SIZE,
                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-#ifdef APP_TRANSPORT
     bool extra_pool_ready = false;
-#endif
     if (extra_pool == NULL) {
         ESP_LOGW(TAG, "Could not allocate LVGL extra PSRAM pool");
     } else if (lv_mem_add_pool(extra_pool, LVGL_EXTRA_POOL_SIZE) == NULL) {
@@ -528,17 +515,13 @@ static void lvgl_task(void *arg)
     } else {
         ESP_LOGI(TAG, "Added %u-byte LVGL PSRAM memory pool",
                  (unsigned)LVGL_EXTRA_POOL_SIZE);
-#ifdef APP_TRANSPORT
         extra_pool_ready = true;
-#endif
     }
-#ifdef APP_TRANSPORT
     if (!extra_pool_ready) {
         ESP_LOGE(TAG, "Live screen requires the LVGL PSRAM pool; stopping");
         vTaskDelete(NULL);
         return;
     }
-#endif
 
     lv_display_t *display = lv_display_create(LCD_H_RES, LCD_V_RES);
     ESP_ERROR_CHECK(display == NULL ? ESP_ERR_NO_MEM : ESP_OK);
@@ -563,8 +546,12 @@ static void lvgl_task(void *arg)
         }
     }
 
-#ifdef APP_TRANSPORT
-    transport_screen_show_live();
+    (void)app_settings_init();
+    if (!transport_screen_show_live()) {
+        ESP_LOGE(TAG, "Could not create transport screen");
+        vTaskDelete(NULL);
+        return;
+    }
     lv_mem_monitor_t lvgl_mem;
     lv_mem_monitor(&lvgl_mem);
     ESP_LOGI(TAG, "LVGL heap after screen creation: free %u, largest %u",
@@ -572,30 +559,16 @@ static void lvgl_task(void *arg)
     /* Allocate the display and LVGL workers before starting Wi-Fi and TLS. */
     if (!departures_service_start()) {
         ESP_LOGE(TAG, "Could not start the departure service");
-        const departures_update_t update = {.status = DEPARTURES_ERROR};
-        transport_screen_set_departures(&update);
+        departures_update_t *update = transport_screen_buffer();
+        update->status = DEPARTURES_ERROR;
+        transport_screen_set_departures(update);
     }
-#else
-    benchmark_screen_create(benchmark_present_count);
-#endif
-#ifdef APP_LVGL_O3
-    ESP_LOGI(TAG, "LVGL compiler optimization: -O3");
-#else
     ESP_LOGI(TAG, "LVGL compiler optimization: -O2");
-#endif
-#ifdef APP_TRANSPORT
     ESP_LOGI(TAG, "Live departure screen running on the 800x480 panel at %u MHz PCLK",
-#else
-    ESP_LOGI(TAG, "Animation benchmark running on the 800x480 panel at %u MHz PCLK",
-#endif
              (unsigned)(LCD_PIXEL_CLOCK_HZ / 1000000));
     ESP_LOGI(TAG, "LVGL direct mode: two %u-byte PSRAM framebuffers",
              (unsigned)frame_buffer_size);
-#ifdef APP_TRANSPORT
     ESP_LOGI(TAG, "Timing: FreeRTOS tick %u Hz, LVGL configured default %u ms",
-#else
-    ESP_LOGI(TAG, "Timing: FreeRTOS tick %u Hz, LVGL configured default %u ms; benchmark alternates 33/25 ms",
-#endif
              (unsigned)CONFIG_FREERTOS_HZ, (unsigned)CONFIG_LV_DEF_REFR_PERIOD);
     ESP_LOGI(TAG, "PSRAM detected: %u bytes", (unsigned)esp_psram_get_size());
 
@@ -616,10 +589,8 @@ static void lvgl_task(void *arg)
     uint32_t delay_count = 0;
     uint32_t delay_actual_max_us = 0;
     while (true) {
-#ifdef APP_TRANSPORT
-        departures_update_t update;
-        if (departures_service_receive(&update)) transport_screen_set_departures(&update);
-#endif
+        departures_update_t *update = transport_screen_buffer();
+        if (departures_service_receive(update)) transport_screen_set_departures(update);
         uint32_t delay_ms = lv_timer_handler();
         uint64_t now_ms = esp_timer_get_time() / 1000;
         if (now_ms - last_diagnostics_ms >= LCD_DIAGNOSTICS_PERIOD_MS) {
